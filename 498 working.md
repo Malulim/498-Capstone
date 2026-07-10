@@ -381,7 +381,7 @@ FS14/FS3(d) make "in-flight" a real, testable quantity, so the design fixes when
 
 ### 3.2.3.4 Config Loader (FS4) and fault handling (NFS8)
 
-At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3 Decision 5), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is NFS8's "malformed config" case: log fault code, refuse to start the polling loop, remain up for re-push — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
+At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3.3.7), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is NFS8's "malformed config" case: log fault code, refuse to start the polling loop, remain up for re-push — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
 
 ### 3.2.3.5 Execution Logger and Console (FS5, FS11)
 
@@ -519,7 +519,7 @@ Figure 3.4 shows the pipeline structure. *(Figure placeholder — reuse the SERV
 
 ## 3.3.2 Engineering Design Process
 
-Six significant design decisions shaped this subsystem. The recurring theme differs from 3.1/3.2: there, the specs priced in *latency* and the decisions bought determinism of *timing*; here, the specs price in *reproducibility and human oversight* and the decisions buy determinism of *results*. Where a rationale is quantitative, the supporting arithmetic appears in 3.3.4.
+Four significant design decisions shaped this subsystem. The recurring theme differs from 3.1/3.2: there, the specs priced in *latency* and the decisions bought determinism of *timing*; here, the specs price in *reproducibility and human oversight* and the decisions buy determinism of *results*. Where a rationale is quantitative, the supporting arithmetic appears in 3.3.4.
 
 ### Decision 1 — Execution environment: Python host pipeline
 
@@ -552,35 +552,21 @@ Grid search is also the more common choice in practice for this kind of low-dime
 
 ### Decision 4 — Text & Sentiment Path architecture (FS9/FS10): where the LLM belongs, and the determinism boundary
 
-The non-essential path raises a design tension: an LLM is the strongest available tool for FS9's actual problem (extracting structured records from heterogeneous unstructured sources — HTML news, social posts, PDF reports), but LLM outputs are non-deterministic and externally hosted — properties that must not contaminate FS7's bit-identical guarantee or FS8's audit chain. The design resolves this by splitting the path at a **determinism boundary** and choosing a different tool on each side.
+An LLM is the strongest available tool for FS9's problem (extracting structured records from heterogeneous unstructured sources), but LLM output is non-deterministic and externally hosted — properties that must not contaminate FS7's bit-identical guarantee or FS8's audit chain. The design splits the path at a **determinism boundary**: an LLM agent handles extraction (FS9), every emitted record is **logged verbatim**, and everything downstream — including scoring — operates only on those logged records. FS7's re-run verification is defined *from the logged records*, so the LLM's own non-determinism never enters it; FS9's verification uses a mocked web server, so the demo doesn't depend on live source availability either.
 
-**Stage 1 — Extraction (FS9): LLM agent, selected for the messy side.** Alternatives: hand-written per-source parsers (rejected: one parser per source format, brittle against layout changes, and PDF report extraction alone is a project), classical NLP/NER pipelines (rejected: comparable integration cost to FinBERT below but solves only entity tagging, not headline/relevance extraction from arbitrary formats). The LLM agent ingests each asset over HTTPS and emits one structured event record (headline, ticker, timestamp, source — FS9's exact field list). Every emitted record is **logged verbatim**; everything downstream operates only on logged records. Non-determinism therefore stops at the boundary: re-running the pipeline *from the logged records* is fully deterministic, which is the precise sense in which FS7's re-run verification is defined. FS9's verification uses a mocked web server, so the demo does not depend on live source availability, regardless of whether the agent is later backed by a hosted API or a local model.
+**Scoring (FS10)** needed a separate, deterministic tool for exactly the part that has to be reproducible:
 
-**Stage 2 — Scoring (FS10): deterministic local model, selected for the auditable side.**
-
-| Criterion (weight) | Lexicon (VADER-class) | FinBERT (local inference, selected) | LLM-scored |
+| Criterion (weight) | Lexicon (Loughran-McDonald) | FinBERT (local inference, selected) | LLM-scored |
 |---|---|---|---|
-| Determinism/reproducibility (30%) | Full | Full — fixed weights, fixed tokenizer, single-threaded CPU inference | None without vendor-side guarantees |
-| Financial-domain validity (25%) | Weak — general-domain lexicon misreads financial polarity ("beats expectations") | Strong — finance-domain fine-tuned [17] | Strong |
+| Determinism/reproducibility (30%) | Full | Full — fixed weights, single-threaded CPU inference | None without vendor-side guarantees |
+| Financial-domain validity (25%) | Moderate — finance-tuned word lists [18] fix polarity vocabulary but have no context/negation handling | Strong — finance-domain fine-tuned, context-aware [17] | Strong |
 | Integration + verification cost (25%) | Trivial | Low — one pip dependency, one forward pass per record; FS10's pre-labeled reference-set test applies directly | API handling, rate limits, cost accounting |
 | Operating cost/availability (20%) | None | None after model download; fully offline | Per-call cost; external availability risk on the nightly path |
-| **Weighted result (1–5 scale)** | 4.25 | **4.75 — Selected** | 2.45 |
+| **Weighted result (1–5 scale)** | 4.5 | **4.75 — Selected** | 2.45 |
 
-*(Scoring: 1–5 per criterion, weighted: lexicon = 0.30×5 + 0.25×2 + 0.25×5 + 0.20×5 = 4.25; FinBERT = 0.30×5 + 0.25×5 + 0.25×4 + 0.20×5 = 4.75; LLM-scored = 0.30×1 + 0.25×5 + 0.25×2 + 0.20×2 = 2.45. The lexicon runs FinBERT close on cost but loses exactly where FS10's correct-polarity verification bites — domain validity.)*
+FinBERT's class probabilities map directly onto FS10's range: `score = P(positive) − P(negative) ∈ [−1, +1]`. Daily score is the simple mean of same-ticker records; `abnormal_event_flag` fires when any |score| ≥ θ_abn = 0.8 (config value).
 
-FinBERT's class probabilities map directly onto FS10's required range: `score = P(positive) − P(negative) ∈ [−1, +1]` with polarity built in — no ad-hoc normalization to defend. Per-asset scores aggregate to a daily score by simple mean (confirmed — recency weighting adds a parameter the prototype has no evidence to calibrate), plus an `abnormal_event_flag` when any single record's |score| exceeds θ_abn = 0.8 (working empirical value, loaded from the pipeline config).
-
-**Coupling into the essential path — risk-tightening-only, by proof.** The sentiment output enters the **Risk Analysis** stage as a position-limit scalar, under a monotonicity constraint proven in 3.3.4.4: the adjusted limit satisfies `L(s) ≤ L_base` for every possible score `s`, with equality for all `s ≥ 0`. Sentiment can therefore only *shrink* the risk envelope below the FS3 ceilings, never expand it, and never touches the optimization objective or strategy selection. Consequently the non-essential path is **incapable of harming the essential system**: its total failure (no assets, API down, model missing) degrades to `s = 0` ⇒ no adjustment ⇒ the essential pipeline's output is byte-identical to a run with the path disabled. This is the same structural-safety argument style as 3.2's "malformed egress is impossible by construction." *(Diagram note: the block diagram's `PATH_TXT → BACKTEST` arrow should be re-annotated to target Risk Analysis — sentiment does not feed the backtest objective, the same fix as the HOLD-arrow correction in 3.2.3.6.)*
-
-### Decision 5 — Approval gate and configuration chain of custody (FS8)
-
-| Alternative | Description | Outcome |
-|---|---|---|
-| Procedural gate | Pipeline writes the config; operator manually copies it to the SoC when satisfied. | **Rejected.** FS8's verification must show the config *cannot* reach the SoC unapproved; a procedure is a promise, not a mechanism — nothing distinguishes an approved file from an unapproved one after the fact. |
-| Approval flag in the config | Pipeline sets `approved: true` after a y/n prompt; transmission code checks the flag before sending. | **Rejected.** The flag is just a field the operator's own approval action writes — but the check-then-send is two separate steps, so a bug between them (or a manually re-edited file) could send an unapproved config without the flag ever being false. |
-| **Structural gate: approval call is on the only path to transmission (selected)** | The operator is shown the FS12 report (regime, sweep table, selected parameters, Sharpe, sentiment adjustment) and approves interactively; the approval prompt's own return value *is* the call that invokes transmission — there is no separate "check the flag, then send" step, and no code path reaches the network send without going through that prompt. A REJECT/no-approval outcome simply never calls it. | **Selected.** FS8's verification ("confirm no transmission before manual approval") is satisfied by inspecting the code path itself: the send call has exactly one caller, and that caller is the approval prompt's success branch. This is the same structural argument as FS4's in 3.2.3.4 — the same reasoning already used elsewhere in the design, without adding a cryptographic layer this single-machine, point-to-point system has no threat model to justify. |
-
-Transport for the approved config is a push over the PS GbE via `scp` to a staging path on the SoC, from which the Config Loader ingests it at startup — selected over a minimal custom TCP receiver purely for implementation convenience.
+**Coupling into the essential path.** Sentiment enters Risk Analysis as a position-limit scalar under a monotonicity proof (3.3.4.4): `L(s) ≤ L_base`, equality for `s ≥ 0` — it can only shrink the risk envelope, never expand it, and never touches strategy selection. A total path failure degrades to `s = 0`, i.e. no adjustment: the essential pipeline's output is then byte-identical to a run with the path disabled. *(Diagram note: the block diagram's `PATH_TXT → BACKTEST` arrow should target Risk Analysis instead — sentiment doesn't feed the backtest objective.)*
 
 ---
 
@@ -717,11 +703,17 @@ Properties proven in 3.3.4.4: `L(s) ≤ L_base` always; `L(s) = L_base` for all 
 | `parameters` | object | The swept winner's values, integer-encoded to match the PS kernel. Keys per strategy — momentum: `lookback`, `entry_thresh`, `pos_scalar`; mean_reversion: `window`, `dev_thresh`, `pos_scalar`; defensive: `spread_floor`, `vol_cutoff`, `pos_scalar` (lockstep with 3.2.3.2's formulas and the 3.3.3a.3 grid axes) |
 | `risk_limits` | object | `max_notional_cad`, `max_position_shares`, `max_order_rate` — post-sentiment values, each ≤ its FS3 ceiling |
 | `provenance` | object | Data window, grid hash, backtest Sharpe, sentiment score, pipeline version — the FS12 record embedded for audit |
-| `approval` | object | `operator_id`, `timestamp` — appended only by the approval action (Decision 5) |
+| `approval` | object | `operator_id`, `timestamp` — appended only by the approval action (3.3.3.7) |
 
 ### 3.3.3.6 FS12 status reporting and server-side fault handling (NFS8)
 
 The pipeline is a strictly linear-with-one-merge sequence of stages run once nightly on one machine, so FS12's requirement — a logged status line per stage transition — is implemented directly as a sequential staged script with a `run_stage()` wrapper that timestamps entry/exit and writes the FS12 record; every stage transition writes one structured log line — `(timestamp, stage, status, key metrics)` — to console and to the nightly log file, and the approval prompt renders the accumulated report (regime, full sweep table, selected parameters, Sharpe, sentiment, risk-check annotations). FS12's verification (one entry per stage transition, including final approval status) is satisfied by this wrapper directly, with no scheduler or DAG framework needed for a pipeline this shape. Server-side recoverable faults follow one uniform policy: log a timestamped fault code; degrade to the stage's neutral/abort behavior (text path → neutral; market path → abort before config generation); never emit a config that any validation stage has not passed.
+
+### 3.3.3.7 Operator Approval and configuration transmission (FS8)
+
+The operator is shown the accumulated FS12 report (regime, full sweep table, selected parameters, Sharpe, sentiment adjustment, risk-check annotations) and approves interactively. The approval prompt's own return value *is* the call that invokes transmission — there is no separate "check the flag, then send" step, and no code path reaches the network send without going through that prompt; a REJECT/no-approval outcome simply never calls it, so the send call has exactly one caller: the approval prompt's success branch. This satisfies FS8's verification ("confirm no transmission before manual approval") by inspection of the code path itself — the same structural argument used for FS4 in 3.2.3.4.
+
+Transport for the approved config is a push over the PS GbE via `scp` to a staging path on the SoC, from which the Config Loader ingests it at startup.
 
 ---
 
@@ -764,7 +756,7 @@ FS7's verification is unusual: it does not measure a quantity, it demands *bit-i
 |---|---|---|
 | Random initialization / sampling | Classifier fit, Bayesian/random search | No fitted model (Decision 2); no sampling (Decision 3) — no RNG is ever seeded because none is used |
 | Parallel evaluation / reduction order | Multi-process sweep; float summation order varies | Sweep is strictly sequential in fixed lexicographic order; float reductions always occur in the same order, so IEEE-754 results are bit-stable across runs on the same platform `[TEAM: pin platform in verification procedure — cross-machine bit-identity additionally requires identical libm/BLAS, so FS7's test runs on one designated host]` |
-| Hash/dict iteration order | Config serialization, grid enumeration | Grids are explicit ordered lists; serialization is canonical (sorted keys, fixed formatting — Decision 5) |
+| Hash/dict iteration order | Config serialization, grid enumeration | Grids are explicit ordered lists; serialization is canonical (sorted keys, fixed formatting — 3.3.3.7) |
 | Floating-point evaluation order | Vectorized NumPy array reductions (signal computation, cumulative P&L) | Single-threaded, fixed operation order on a pinned platform — reductions are bit-stable across re-runs of this pipeline. This does not make the backtest decision-identical to the PS's live (integer) engine; that parity gap is a separate, stated limitation (3.3.3a.3), not an FS7 concern, since FS7 only requires the EOD pipeline to reproduce itself |
 | Tie on the selection metric | Two grid points with equal Sharpe | Total-order tie-break (lexicographic parameter order) — the argmax is unique by construction |
 | Threaded ML inference | FinBERT multi-thread scheduling can reorder float ops | Single-threaded CPU inference pinned in configuration (3.3.3b.2) |
@@ -808,10 +800,10 @@ The upper bound `L(s) ≤ L_base` holds in both cases with no dependence on the 
 
 ### 3.3.4.5 Grid scale sensitivity (why exhaustive search is the right size, and when it stops being)
 
-| Configuration | Kernel evaluations | Est. sweep time (pessimistic 5 μs/call) | Verdict |
+| Configuration | Grid points | Est. sweep time (scaled from 3.3.4.1's ≈ 1 min / 27-point allowance) | Verdict |
 |---|---|---|---|
-| Prototype: 1 symbol × 27-pt grid × 1 session | 63 M | ≈ 5.5 min | Selected operating point |
-| 5-value axes (125-pt grid) | 293 M | ≈ 24 min | Fits NFS5 alone; no headroom with text path — practical ceiling of the pure-Python kernel |
+| Prototype: 1 symbol × 27-pt grid × 1 session | 27 | ≈ 1 min | Selected operating point |
+| 5-value axes (125-pt grid) | 125 | ≈ 4–5 min (≈ 125⁄27 × the 27-point allowance) | Comfortably fits NFS5 even with the text path included — vectorized per-point cost scales with grid points, not with the ~2.34 M-record snapshot array, so the old per-record-loop ceiling no longer applies |
 
 The table bounds the design's validity region explicitly: exhaustive grid + vectorized backtest kernel is correct for the specified prototype and its first two growth steps, and the design records precisely which future requirement invalidates it and what the successor is.
 
@@ -823,11 +815,11 @@ The table bounds the design's validity region explicitly: exhaustive grid + vect
 |---|---|---|
 | FS6 | Percentile-thresholded two-feature classifier; ≥ 3 non-empty regimes provable by construction (3.3.4.3) | Closed by arithmetic; pending 6-month reference-data run |
 | FS7 | Exhaustive fixed-order grid + deterministic vectorized kernel + total-order tie-break; all nondeterminism sources enumerated and closed (3.3.4.2) | Analytical; pending double-run byte-compare |
-| FS8 | Transmission call structurally unreachable without operator approval — the send has one caller, the approval prompt's success branch (Decision 5) | Pending no-approval injection test |
+| FS8 | Transmission call structurally unreachable without operator approval — the send has one caller, the approval prompt's success branch (3.3.3.7) | Pending no-approval injection test |
 | FS9 (non-ess.) | LLM agent → verbatim-logged structured records; per-asset fault isolation | Pending mocked-server ingestion test |
 | FS10 (non-ess.) | FinBERT scoring in [−1,+1] by construction; risk-tightening-only coupling with proven bound (3.3.4.4) | Analytical; pending pre-labeled reference-set test |
 | FS12 (non-ess.) | `run_stage()` wrapper logs every transition; approval report aggregates regime/sweep/Sharpe/status | Pending full-cycle log inspection |
-| NFS5 (non-ess.) | ≈ 7–8 min pessimistic total vs 30 min budget; ≥ 3× margin with growth allowance (3.3.4.1, 3.3.4.5) | Analytical; pending reference-dataset wall-clock |
+| NFS5 (non-ess.) | ≈ 2–3 min pessimistic total vs 30 min budget; ≥ 10× margin with growth allowance (3.3.4.1, 3.3.4.5) | Analytical; pending reference-dataset wall-clock |
 | NFS8 | Validate-before-compute; fault-coded logging; text path degrades to neutral; no config emitted past a failed validation | Pending malformed-input injection |
 
 ---
@@ -1078,10 +1070,12 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 
 [17] D. Araci, "FinBERT: Financial Sentiment Analysis with Pre-trained Language Models," arXiv preprint arXiv:1908.10063, Aug. 2019.
 
+[18] T. Loughran and B. McDonald, "When Is a Liability Not a Liability? Textual Analysis, Dictionaries, and 10-Ks," *Journal of Finance*, vol. 66, no. 1, pp. 35–65, Feb. 2011, doi: 10.1111/j.1540-6261.2010.01625.x.
+
 ### Further reading (uncited in this document)
 
 - FIX Trading Community, "FIX Adapted for STreaming (FAST) Specification." [Online]. Available: https://www.fixtrading.org/standards/fast-online/ [Accessed: Jul. 9, 2026].
 - J. Zang, "quant-engine: a C++ quantitative backtest and research engine," independent project documentation. [Online]. Available: https://qe.jiucheng-zang.ca [Accessed: Jul. 2026].
 
-`[TEAM: bibliography housekeeping — (i) confirm the Toshiba entries' actual venues (both appear to be published papers; locate DOI/venue before submission); (ii) confirm the citation style guide for online resources; (iii) Hamilton 1989, Bailey et al. 2017 (backtest overfitting), and FinBERT/Araci 2019 are now in the list as [15]–[17]; 3.3's remaining pending citations (Loughran-McDonald 2011, TradingAgents 2024/2412.20138) should be appended if and when actually cited.]`
+`[TEAM: bibliography housekeeping — (i) confirm the Toshiba entries' actual venues (both appear to be published papers; locate DOI/venue before submission); (ii) confirm the citation style guide for online resources; (iii) Hamilton 1989, Bailey et al. 2017 (backtest overfitting), FinBERT/Araci 2019, and Loughran-McDonald 2011 are now in the list as [15]–[18]; TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
 
