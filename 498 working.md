@@ -231,6 +231,8 @@ Figure 3.2 shows the PS runtime structure. *(Figure placeholder — must reuse t
 
 ### 3.2.2 Engineering Design Process
 
+Quantitative analysis for latency, interface capacity, Risk Guard cost, and logging-memory bounds is integrated directly into the decisions and final-design elements it supports.
+
 #### Decision 1 — Hardware/software boundary: strategy in PL vs. strategy in PS
 
 | Alternative | Description | Outcome |
