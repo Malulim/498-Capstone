@@ -231,13 +231,7 @@ Figure 3.2 shows the PS runtime structure. *(Figure placeholder — must reuse t
 
 ### 3.2.2 Engineering Design Process
 
-<<<<<<< HEAD
 #### Decision 1 — Hardware/software boundary: strategy in PL vs. strategy in PS
-=======
-Quantitative analysis for latency, interface capacity, Risk Guard cost, and logging-memory bounds is integrated directly into the decisions and final-design elements it supports.
-
-### Decision 1 — Hardware/software boundary: strategy in PL vs. strategy in PS
->>>>>>> cb4cd09fc198e9ca3e02545658f03adab166b18d
 
 | Alternative | Description | Outcome |
 |---|---|---|
@@ -335,17 +329,8 @@ The guard executes unconditionally after every non-HOLD decision in the same thr
 |---|---|---|
 | Notional | qty × price ≤ $50,000 CAD limit (configurable) | 32×32→64-bit multiply, one compare |
 | Position | \|position ± qty\| ≤ 1,000 shares | Signed accumulate against local position state, range-checked against ±1,000 (two compares) |
-<<<<<<< HEAD
-| Rate | ≤ 1,000 orders/s | Token bucket: capacity 1,000, refill from the global timer via fixed-point multiply-shift — no divides on the hot path (3.2.4.1) |
-| In-flight | in-flight count ≤ 100 | Compare against open-order table occupancy counter (increment on doorbell; decrement on terminal transition — 3.2.3.3.1) |
-
-Rejections write a reason-coded record to the Execution Logger (FS3's "logged reason code") and never reach the doorbell. A REJECT may also assert the Runtime Trigger into HOLD Mode (3.2.3.6). Limits load from the FS4 config and are immutable during a session.
-
-##### 3.2.3.3.1 Open-order table (FS14)
-=======
 | Rate | ≤ 1,000 orders/s | Token bucket with fixed-point refill; no divide on the hot path |
 | In-flight | in-flight count ≤ 100 | Compare against open-order table occupancy |
->>>>>>> cb4cd09fc198e9ca3e02545658f03adab166b18d
 
 Core 1 maintains a fixed, pre-allocated open-order table of 100 entries `{order_id, side, qty, price, submit_timestamp, state}` for the traded symbol — sized exactly to FS3(d)/FS14's in-flight ceiling, since the Risk Guard's in-flight check rejects before insertion and the table never needs to hold more than that.
 
@@ -359,99 +344,11 @@ At startup, before core 1 begins polling, the loader validates the JSON configur
 
 The logger is pure software: core 1 writes fixed 128 B records into a pre-allocated 256 MB cached-DDR ring, with no hot-path allocation and therefore no hot-path OOM. Each record is one of: decision, execution outcome, sampled snapshot, Risk Guard reject, or fault. The fixed schema groups type/decision metadata, strategy/reason codes, PL and CPU timestamps, top-of-book fields, emitted-order fields, position/in-flight/PnL state, and reserved growth space.
 
-<<<<<<< HEAD
-**Execution record schema (frozen — 128 B fixed).** One record per strategy decision, execution outcome, sampled snapshot, Risk Guard REJECT, or fault event, written by core 1 as a single fixed-size struct copy:
-
-| Field | Offset (B) | Size (B) | Content |
-|---|---|---|---|
-| `record_type` | 0 | 1 | 0x01 DECISION, 0x02 OUTCOME, 0x03 SNAPSHOT, 0x04 REJECT, 0x05 FAULT |
-| `decision` | 1 | 1 | 0x00 HOLD, 0x01 BUY, 0x02 SELL (0x00 for non-decision records) |
-| `strategy_id` | 2 | 1 | Active strategy index (FS4 config) |
-| `reason_code` | 3 | 1 | FS3 reject reason / fault code; 0 otherwise |
-| `seq` | 4 | 4 | PL snapshot `SEQ` this record was decided against |
-| `pl_timestamp` | 8 | 8 | `TIMESTAMP_LO/HI` of the committing packet (3.2.3.1) |
-| `cpu_timestamp` | 16 | 8 | Core-1 PMU cycle count (CCNT) — FS2 instrumentation for free |
-| `best_bid_price`, `best_bid_qty`, `best_ask_price`, `best_ask_qty` | 24 | 16 | Top-of-book at decision time (4 × u32, integer cents / shares) |
-| `order_id` | 40 | 4 | 0 if no order emitted |
-| `order_qty`, `order_price` | 44 | 8 | 2 × u32; 0 if no order |
-| `position_after` | 52 | 4 | Signed shares after this record's effect |
-| `inflight_count` | 56 | 4 | Open-order table occupancy after this record |
-| `realized_pnl` | 60 | 8 | Cumulative, signed integer cents |
-| `reserved` | 68 | 60 | Zero-filled — pads to 128 B and absorbs schema growth without a size change |
-
-#### 3.2.3.6 HOLD Mode
-
-HOLD is a state, not a message: per-decision, it just means no doorbell write, and a HOLD record enters the logger. At the session level, HOLD Mode is a latched state entered by (a) the Runtime Trigger from a Risk Guard REJECT pattern — **≥ 3 REJECTs within a rolling 10 s window**, both values from the FS4 config and deliberately conservative — or (b) the EOD path's "REJECT / No Approval" outcome; while latched, the strategy is forced to HOLD until an operator clears it. HOLD needs no PL cooperation — it's simply the absence of a doorbell write.
-
----
-
-### 3.2.4 Quantitative Technical Analysis
-
-#### 3.2.4.1 FS2 latency budget, interface capacity, and Risk Guard cost (30 μs at 766 MHz)
-
-30 μs ≈ 23,000 CPU cycles at 766 MHz (the Cortex-A9 max frequency on the target board). The budget also funds the PL egress tail (doorbell-to-MAC-TX ≈ ~1 μs by 3.1 arithmetic), leaving ~29 μs for software:
-
-| Stage | Estimate | Basis |
-|---|---|---|
-| Detect new `SEQ` (one GP0 read) | ~0.15–0.3 μs | AXI-Lite read via GP; pending PMU/ILA microbenchmark — the single number this table hangs on |
-| Snapshot read: 4–6 field reads + seqlock re-read | ~1–1.8 μs | 6–8 GP reads; retry probability bounded below |
-| Strategy evaluation | ≤ ~1 μs | Hundreds of integer ops on O(1) state — generous ceiling |
-| Runtime Risk Guard | ≪ 0.1 μs | ~25–30 cycles, detailed below |
-| Logger record write | ≤ ~0.5 μs | Fixed 128 B struct copy into cached ring |
-| Order-field writes + doorbell (5 GP writes) | ~0.5–1 μs | AXI-Lite posted writes |
-| **Software total** | **≤ ~5 μs** | **≥ 5.5× margin against the ~29 μs share; worst case is what FS2's 1,000-tick verification samples** |
-
-Under the rejected interrupt design, the first row alone costs 10–40 μs — 40–160% of budget before any work. The selected design's entire path is bounded by countable bus transactions. These estimates will be replaced with PMU (CCNT) per-stage instrumentation across 1,000 ticks, then the Wireshark end-to-end check.
-
-**Runtime Risk Guard cost bound.** Notional: one `umull` + compare ≈ 5–10 cycles. Position: add + two compares ≈ 5 cycles. Rate: timer-delta × fixed-point constant, multiply-shift-saturate ≈ 10 cycles; spend = decrement + compare ≈ 2 cycles. In-flight: one counter compare ≈ 1–2 cycles. Total ≈ 23–29 cycles ≈ 0.03–0.04 μs at 766 MHz — under 0.1% of the FS2 budget — quantitatively closing 3.2.3.3's "no latency case for hardware risk checks" claim.
-
-**Interface capacity, conflation, and the DMA comparison.** Three rates bound the system (using the GP-read estimate above, worst case 0.3 μs):
-
-```
-Snapshot read cost (6 reads + seqlock): ~1.5–2 μs → PS observation ceiling ≈ 500–670 K snapshots/s
-Full decision iteration (table above): ≤ ~5 μs → PS decision ceiling ≥ ~200 K decisions/s
-Wire tick ceiling (3.1.2, Decision 2): 1.389 M ticks/s
-```
-
-The PS cannot observe every tick (670 K < 1.389 M) — but it cannot *process* every tick either (200 K < 1.389 M): **the bottleneck is the CPU, not the interface.** A DMA ring would not raise either ceiling; it would only queue ticks the CPU cannot consume, forcing the strategy to act on progressively staler books — for trading, a negative. A ring consumer would end by skipping to the newest entry, i.e., re-implementing conflation with more hardware.
-
-**Conflation is a consequence of Decision 1, not an HFT norm.** The published architectures split into camps that don't face this trade-off at all: Kao et al. and Boutros et al. keep the trading logic itself in fabric, so there is no software consumer to outrun the wire and no tick is ever discarded [2], [6]; Toshiba's production system pushes even the optimization layer into a hardware-realized solver for the same reason [8]. Morris et al. instead keep software in the loop but route the full tick stream into a host-memory queue via DMA, and explicitly warn that market bursts can outrun the consuming thread and build an unbounded backlog of increasingly stale data [4] — precisely the failure mode conflation is built to avoid. This project takes neither path wholesale: Decision 1 commits the strategy to PS software for nightly EOD reconfigurability, which rules out the fully-hardware camp, and an unbounded backlog is worse for a top-of-book strategy than a bounded, always-current sample, which rules out queueing the full stream. Conflation is the right call *given* that commitment — not a claim that discarding ticks is standard HFT practice. For a strategy that needs the discarded microstructure (order-flow imbalance, queue position), it would be the wrong one, and Decision 1 would need revisiting first.
-
-Seqlock retry probability: a retry occurs only if a commit lands inside the ~1.5 μs read window; even at full wire rate the expected retries per read ≈ 1.5 μs × 1.389 M/s ≈ 2 — bounded by capping retries at 4 and accepting the newest consistent snapshot; a retry-rate counter will be recorded during full-rate injection.
-
-**Sensitivity boundaries (when this interface stops being right):**
-
-| Condition | Register path | Conclusion |
-|---|---|---|
-| Current spec: 1 symbol, top-of-book, conflation acceptable | ~1.5–2 μs/read, ≥ 5× FS2 margin | **Adequate — selected** |
-| Payload > ~100 B/event (e.g., 10-level depth) | ~40 reads ≈ 10 μs — erodes margin | Migrate to a **GP-mapped dual-port BRAM window** (PL BRAM as AXI slave) — still no DMA IP, no driver |
-| Per-tick consumption required (no conflation) | Observation ceiling < wire rate | DMA ring required — and a faster CPU with it; out of prototype scope |
-
-**TX contention arithmetic:** FS3 caps orders at 1,000/s (≥ 1 ms spacing) vs. ~1 μs per packet transmit — a 1000× margin; `TX_READY` exists as a correctness invariant, not a performance mechanism.
-
-#### 3.2.4.2 FS5 memory budget arithmetic
-
-Record size = 128 B (schema frozen in 3.2.3.5):
-
-```
-Full per-tick logging: 1.389 M/s × 128 B ≈ 178 MB/s bandwidth; 10 M ticks × 128 B = 1.28 GB capacity — already over the board's entire 1 GB of DDR3, before even setting aside room for the OS and code
-Available DDR3 (approx): PS DDR3 is 1 GB total (2×512 MB). Assuming ≈ 512 MB remains available after OS + code is a reasonable working budget for FS5 planning.
-Decision-record ceiling: 1,000/s (FS3) × 128 B = 128 KB/s
-Snapshot sampling @100 Hz: 12.8 KB/s
-```
-
-Per-tick logging fails on both capacity and bandwidth, which is why the ring (3.2.3.5) logs decisions/outcomes in full but only samples snapshots. The selected policy's sustained rate (~141 KB/s) is three orders of magnitude below the failure mode; the 256 MB ring holds ≈ 30 minutes at the absolute-worst decision rate while core 0 drains continuously to eMMC, so occupancy stays bounded. The board's 8 GB eMMC capacity is ample for the ring + export; the remaining question is sustained write bandwidth, which must be measured. No allocation after startup — FS5's no-OOM clause holds by construction.
-
----
-
-### 3.2.5 Specification Compliance Summary
-=======
 Full per-tick logging fails by arithmetic: `1.389 M/s × 128 B ≈ 178 MB/s`, and `10 M ticks × 128 B = 1.28 GB`, exceeding the practical memory budget before OS/code are considered. The selected policy instead logs all decision/outcome/reject/fault records, rate-capped by FS3 at 1,000/s, plus snapshots sampled at 100 Hz and on order events. The 100 Hz snapshot rate is a prototype observability policy: it gives 10 ms temporal resolution for session replay/debugging while contributing only 12.8 KB/s, small relative to the 128 KB/s decision-log ceiling. This is about 128 KB/s + 12.8 KB/s = **141 KB/s**, so the 256 MB ring holds about 30 minutes at the worst-case decision rate while core 0 drains continuously to eMMC. Core 0 also performs end-of-session export over PS GbE, periodic `DIAG_*` sampling, and the FS11 1 Hz Debug-UART console feed without charging core 1.
 
 ---
 
 ## 3.2.4 Specification Compliance Summary
->>>>>>> cb4cd09fc198e9ca3e02545658f03adab166b18d
 
 | Spec | How the final design satisfies it | Evidence status |
 |---|---|---|
