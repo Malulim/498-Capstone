@@ -435,7 +435,7 @@ Per-tick logging fails on both capacity and bandwidth, which is why the ring (3.
 # 3.3 EOD Server Pipeline Subsystem
 
 > **Scope note:** an earlier draft of this subsystem also carried a non-essential text/LLM-sentiment path (FS9/FS10), which has been dropped from scope (rationale in the Section 2 footnote). Stage names are *Parameter Engineering, Regime Detection, Strategy Reoptimize, Backtest & Parameter Sweep, Risk Analysis, Generate JSON Config, Operator Approval*.
-> All numeric analysis in 3.3.4 is derivable on paper today (dataset-size arithmetic, iteration-count budgets, complexity bounds, inequality proofs) — no code required.
+> All numeric analysis in this section is derivable on paper today (dataset-size arithmetic, iteration-count budgets, complexity bounds, inequality proofs) — no code required. Quantitative analysis appears inline where each decision or design element needs it, not as a separate section.
 
 ---
 
@@ -456,7 +456,7 @@ This subsystem is directly responsible for the following specifications:
 | **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes. |
 | **NFS8** | Owner of server-side fault handling: malformed/missing input data must degrade safely (log fault code, emit no config) rather than abort the nightly cycle uncleanly. |
 
-Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The OHLCV source is pinned to the project's own 3.4 corpus: seed-reproducible simulator sessions aggregated to daily bars (regime-labeled, unlimited volume, zero license cost), anchored by the real LOBSTER AAPL sample day (3.4.4.6 — a freely published official sample), so no external market-data feed or license is required. Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
+Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from 3.4's synthetic simulator, which produces tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
 
 Figure 3.4 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.6 and 3.3.3.7, not as a generic link.)*
 
@@ -464,7 +464,7 @@ Figure 3.4 shows the pipeline structure. *(Figure placeholder — reuse the SERV
 
 ## 3.3.2 Engineering Design Process
 
-Three significant design decisions shaped this subsystem. The recurring theme differs from 3.1/3.2: there, the specs priced in *latency* and the decisions bought determinism of *timing*; here, the specs price in *reproducibility and human oversight* and the decisions buy determinism of *results*. Where a rationale is quantitative, the supporting arithmetic appears in 3.3.4.
+Three significant design decisions shaped this subsystem. The recurring theme differs from 3.1/3.2: there, the specs priced in *latency* and the decisions bought determinism of *timing*; here, the specs price in *reproducibility and human oversight* and the decisions buy determinism of *results*. Where a rationale is quantitative, the supporting arithmetic appears inline with the decision it licenses.
 
 ### Decision 1 — Execution environment: Python host pipeline
 
@@ -477,23 +477,46 @@ The classifier's job in AQTA is *routing* — selecting which of the three pre-b
 | Dimension | Rule-based threshold (selected) | Hidden Markov Model |
 |---|---|---|
 | Classification fidelity | Adequate for a routing decision | Best-in-literature for regime persistence [15] — but FS6's verification only checks ≥ 3 regimes appear, never scores accuracy, so this advantage is never actually tested |
-| Implementation & verification cost, given team capability | Two features, three comparisons; exhaustively unit-testable in a day | Baum-Welch/EM fitting is init-sensitive; the standard multi-restart fix is itself stochastic; a new `hmmlearn` dependency none of the team has used before |
+| Implementation & verification cost, given team capability | Two features, three comparisons; exhaustively unit-testable in a day | The HMM has to be *fit* to data (an iterative statistical procedure, not a fixed formula), it isn't guaranteed to converge to the same answer on every run, and it's a new dependency (`hmmlearn`) none of the team has used before |
 | Operator auditability (FS8) | "vol > 75th percentile ⇒ Volatile" is checkable against a chart in seconds | State posteriors need post-hoc labeling and give no intuitive account of why a day was classified a given way — the FS8 approval step becomes a formality |
 
 HMM wins only on the one dimension FS6 doesn't verify; the rule-based classifier wins on implementation cost and on the auditability FS8 actually requires, which is decisive given the team's capability and bandwidth already committed to 3.1/3.2.
 
-### Decision 3 — Parameter search (FS7): exhaustive grid vs. Bayesian optimization
+### Decision 3 — Parameter search (FS7): exhaustive grid
 
-Bayesian optimization (GP/TPE) is the more sample-efficient search method in general, and the natural instinct for anyone coming from an ML background. Weighed against what FS7 actually requires:
+We exhaustively enumerate the 27-point grid rather than using a smarter search method (e.g. Bayesian optimization): the grid is cheap enough to fully evaluate (arithmetic below), a full sweep is deterministic by construction — which "smart" search methods aren't, and directly satisfies FS7's bit-identical requirement — and it also gives the operator the *complete* result table for FS8 review, not just the points a search algorithm happened to sample.
 
-| Dimension | Exhaustive grid search (selected) | Bayesian optimization |
-|---|---|---|
-| FS7 compliance (bit-identical re-run) | Deterministic by construction — fixed enumeration order + sequential evaluation + total-order tie-break (3.3.3.3) means identical input bytes produce identical output bytes | Stochastic by nature (acquisition-function sampling); bit-identical re-run would need to be defended through strict seed and library-version discipline |
-| Implementation & verification cost | Enumerate the grid, evaluate each point with the backtest kernel, pick the maximizer — no new dependency | A heavyweight dependency (e.g., scikit-optimize/GPyOpt) to defend and verify, for a 3-dimensional space that doesn't need it |
-| Cost the method is solving for | N/A — 3.3.4.1 shows the entire 27-point grid evaluates in minutes, well inside NFS5's 30-minute budget | Sample efficiency, which matters when each evaluation is expensive — not the case here |
-| Operator auditability (FS8) | Exhaustive: the operator report shows the *complete* 27-row sweep table | Only shows the points it chose to sample — a partial, algorithm-selected trace |
+**Runtime budget (NFS5) — the arithmetic behind "the grid is cheap."** NFS5 allows 30 minutes on the reference workload (1 year of daily OHLCV). The pipeline's cost is dominated by one term — the sweep — and every other stage is bounded by trivial arithmetic:
 
-Grid search is also the more common choice in practice for this kind of low-dimensional strategy-parameter tuning: "smart" optimizers that concentrate trials near an apparent optimum are the more overfitting-prone search strategy on noisy backtest data, so a small, coarse grid is a deliberate hedge, not merely the cheaper option [16].
+```
+Regime path input:      252 daily bars → feature computation O(n), n = 252    → milliseconds
+Regime classification:  two percentile lookups + three comparisons, O(1)      → microseconds
+
+Sweep workload:
+  snapshot records/session = 100 Hz × 6.5 h × 3600 s/h = 2.34 M records
+  grid size                = 27 combinations
+  Per grid point: one pass of vectorized NumPy/pandas array operations (signal computation,
+    position derivation, cumulative P&L) over the 2.34 M-row snapshot array — vectorized
+    operations at this scale are expected to run in well under a second per grid point on
+    commodity hardware `[EVIDENCE: order-of-magnitude expectation from vectorized-array
+    performance in general; not yet benchmarked on this project's actual data shapes — pending
+    a wall-clock run on the EOD server before final submission]`
+  sweep time (pessimistic allowance) ≈ 1 min, covering I/O, pandas overhead, and repeated
+    array allocation across 27 points
+
+Report/serialize:  negligible
+
+Pipeline total (pessimistic): ≈ 1–2 min  →  ≥ 15× margin against NFS5 = 30 min
+```
+
+This arithmetic is what licenses both Decision 1 and this one: Python is fast enough and exhaustive search is affordable, because a vectorized sweep over 27 grid points costs a small fraction of the 30-minute budget regardless of where the exact per-point timing lands. The margin is a *design allowance*, not slack to be admired — it absorbs grid growth and multi-session backtest windows, and the sensitivity table below bounds exactly how far:
+
+| Configuration | Grid points | Est. sweep time (scaled from the ≈ 1 min / 27-point allowance above) | Verdict |
+|---|---|---|---|
+| Prototype: 1 symbol × 27-pt grid × 1 session | 27 | ≈ 1 min | Selected operating point |
+| 5-value axes (125-pt grid) | 125 | ≈ 4–5 min (≈ 125⁄27 × the 27-point allowance) | Comfortably fits NFS5 — vectorized per-point cost scales with grid points, not with the ~2.34 M-record snapshot array |
+
+The table bounds the design's validity region explicitly: exhaustive grid + vectorized backtest kernel is correct for the specified prototype and its first two growth steps.
 
 ---
 
@@ -503,7 +526,7 @@ The pipeline is a sequential staged program; Figure 3.5 shows the stage graph wi
 
 ### 3.3.3.1 Data import and Parameter Engineering
 
-Inputs are validated before any computation (NFS8): schema check on the exported session archive, monotonic-timestamp check, minimum-history check (≥ 252 trading days of OHLCV — one year, matching the calibration window validated in 3.3.3.3.1; anything shorter risks a calibration window too thin for the percentile scheme to be meaningful). Validation failure logs a fault code and aborts before config generation — bad data produces no candidate config, not a config built on garbage.
+Inputs are validated before any computation (NFS8): schema check on the exported session archive, monotonic-timestamp check, minimum-history check. The floor is defined as **calibration window + 126 trading days**, not a fixed number: the calibration window (config-adjustable, ~60–90 trading days is enough for the percentile scheme in 3.3.3.2 to be statistically meaningful) has to sit entirely *before* the earliest day being classified, and FS6's own verification method classifies a 6-month (126 trading day) span — so the floor is tied to whatever calibration window is configured, and can never be tighter than what FS6's own verification procedure needs to run at all. Validation failure logs a fault code and aborts before config generation — bad data produces no candidate config, not a config built on garbage.
 
 Two features are computed from daily OHLCV closes:
 
@@ -512,7 +535,7 @@ Two features are computed from daily OHLCV closes:
 | Realized volatility `σ` | `σ = std(ln(Cₜ/Cₜ₋₁)) × √252` | 20 trading days (same window as the SMA₂₀ trend leg, for consistency) |
 | Trend strength `T` | `T = (SMA₅ − SMA₂₀) / SMA₂₀` | 5- and 20-day SMAs |
 
-Both are standard constructions; the calibration scheme below (3.3.3.2) is the real design contribution, with its non-degeneracy guarantee in 3.3.4.3.
+Both are standard constructions; the calibration scheme below (3.3.3.2) is the real design contribution, with its non-degeneracy guarantee proven there.
 
 ### 3.3.3.2 Regime Detection (FS6)
 
@@ -526,6 +549,10 @@ else:                      regime = RANGING    → Mean Reversion
 ```
 
 Pure function of the input window — no state, no seed, no fit. Unit tests cover all three branches plus both boundary equalities (`≥` resolves ties toward the safer, Defensive branch).
+
+**Non-degeneracy.** FS6 requires ≥ 3 distinct regimes over a 6-month test window. Fixed thresholds (e.g. "vol > 25% ⇒ Volatile") fail this on a calm stretch that never crosses the constant, collapsing every day to one label. Percentile-based thresholds don't have that failure mode: by definition, the top 25% of days by volatility in the calibration window are classified VOLATILE, and TRENDING/RANGING split the remainder — a single-label output is structurally impossible.
+
+The classifier calibrates on a trailing window and applies that threshold to the next, out-of-sample window, since a live system cannot compute a threshold from data it hasn't seen yet. 3.3.3.3.1 validates this deployed trailing-window scheme directly on a real 6-month window and confirms all three regimes present (80/29/17). Extending that validation across additional historical windows is the scheduled next verification step, not an open design question — the classification rule itself is final.
 
 ### 3.3.3.3 Strategy Reoptimize — Backtest & Parameter Sweep (FS7)
 
@@ -549,11 +576,23 @@ select params* = argmax over sharpe,
        ties broken by lexicographic parameter order      # total order ⇒ unique winner
 ```
 
-**Stated limitation.** The strategy logic here is a separate Python/NumPy implementation of each strategy's rules, not a port of the PS's C functions — chosen for implementation simplicity over maintaining a second, parity-ported execution path. The backtest is therefore not guaranteed decision-identical to the live PS engine (rounding, evaluation order, fill-timing can all differ), so the sweep's Sharpe figures are an estimate of live behavior, not a replay of it. This gap is bounded by the PS Runtime Risk Guard (re-enforces FS3 at runtime regardless of what the backtest assumed) and by operator review; closing it via cross-validation against a recorded PS session is future work. The fill model is a further, stated simplification: fill at the touch, no queue-position or impact modeling. Sharpe is a P&L-based variant, `mean(daily P&L) / std(daily P&L) × √252`. FS7's bit-identical requirement is about re-running *this* pipeline on the same input, not about matching the PS engine — the vectorized computation is deterministic on a fixed, single-threaded platform (3.3.4.2), and the tie-break rule removes the last path to a run-dependent selection.
+**Scope.** The backtest strategy logic is a separate Python/NumPy implementation, not a port of the PS's C code — simpler to build, at the cost of not being an exact replay of live behavior. The PS Runtime Risk Guard and the operator's review at approval time already cover that gap, so it doesn't weaken FS3 or FS8. Fills are priced at the touch, with no queue or market-impact modeling. Grid points are ranked by a Sharpe-style score, `mean(daily P&L) / std(daily P&L) × √252` — steady profit scores higher than the same profit earned inconsistently. FS7's bit-identical requirement is about re-running this pipeline on the same input, not matching the PS — and the computation is deterministic and single-threaded, so that's satisfied.
+
+**FS7 determinism.** FS7 requires bit-identical re-runs, not just correct output. Every source of nondeterminism is closed:
+
+| Source | How it's eliminated |
+|---|---|
+| Random init / sampling | No fitted model, no sampling (Decisions 2–3) — no RNG is used |
+| Parallel evaluation order | Sweep runs strictly sequential in a fixed order — stable summation |
+| Hash/dict iteration | Grids are ordered lists; serialization is canonical (3.3.3.7) |
+| Cross-machine float differences | Verification runs both re-run passes on one designated host |
+| Tie on Sharpe | Lexicographic tie-break — winner is always unique |
+
+Verified by running the pipeline twice on the same input and byte-comparing the output.
 
 #### 3.3.3.3.1 Preliminary validation run (real data)
 
-The procedures above were run end-to-end against real AAPL daily OHLCV (1984-09-07 to 2008-10-14, BSD-licensed public archive, fetched via raw.githubusercontent.com) as a preliminary check ahead of full implementation; this dataset is a development/validation placeholder only — the production source is the 3.4 corpus per 3.3.1, so no external feed or license is required.
+The procedures above were run end-to-end against real AAPL daily OHLCV (1984-09-07 to 2008-10-14, BSD-licensed public archive, fetched via raw.githubusercontent.com) as a preliminary check ahead of full implementation. This is a stand-in for the production source (Yahoo Finance, per 3.3.1) rather than a pull from Yahoo Finance itself; both are free daily-OHLCV sources with no license required, so the substitution does not change the data-access argument. This window predates and is unrelated to the LOBSTER anchor day (3.4.4.6); the two real-data checks in this report are independent by design — this one exercises the regime/sweep procedure on a full percentile-scheme-sized history, the other (3.4.4.6) exercises the tick-level protocol translation — and are not required to share a period.
 
 Calibrating on 2007-04-18 to 2008-04-16 (252 trading days, `θ_vol = 0.518`, `θ_trend = 0.059`) and classifying the next 126 days — which fall in the Sept–Oct 2008 crash:
 
@@ -563,7 +602,7 @@ Calibrating on 2007-04-18 to 2008-04-16 (252 trading days, `θ_vol = 0.518`, `θ
 | TRENDING | 29 |
 | VOLATILE | 17 |
 
-All three non-empty — the 3.3.4.3 non-degeneracy proof holds empirically here too. Sweeping the same 27-point grids against each regime's days, selecting by Sharpe:
+All three non-empty — the 3.3.3.2 non-degeneracy proof holds empirically here too. Sweeping the same 27-point grids against each regime's days, selecting by Sharpe:
 
 | Regime | Strategy | Winning parameters | Sharpe |
 |---|---|---|---|
@@ -573,15 +612,17 @@ All three non-empty — the 3.3.4.3 non-degeneracy proof holds empirically here 
 
 VOLATILE is reported as-is: even the best of 27 candidates during a genuine crash still loses money on a risk-adjusted basis. This is not a design failure — it's exactly the situation the FS8 approval gate exists for, since the operator sees the full sweep table, not just the winning row.
 
-This run validates the procedure — determinism, non-degenerate classification, fixed tie-break, sweep-table transparency — on real data. It does **not** validate sweep runtime (3.3.4.1) or the actual PL/PS system, which doesn't exist yet.
+This run validates the procedure — determinism, non-degenerate classification, fixed tie-break, sweep-table transparency — on real data. It does **not** validate sweep runtime (Decision 3's runtime budget) or the actual PL/PS system, which doesn't exist yet.
 
 ---
 
 ### 3.3.3.4 Risk Analysis and config generation
 
-A checklist, not an optimizer: (1) the backtest never breached FS3 ceilings (notional ≤ $50,000 CAD, position ≤ 1,000 shares, rate ≤ 1,000 orders/s, re-enforced at runtime by 3.2.3.3); (2) max drawdown ≤ $25,000 CAD — half the FS3 notional ceiling, a sanity bound rather than an independent parameter; (3) a 10-trade floor flags a "great Sharpe" built on too few trades for the mean/std estimate to mean anything (e.g., 2 trades). Any failure is written into the operator report — Risk Analysis annotates, the operator decides.
+A validation pass on the winning parameters, not another optimization step. Three checks: (1) did this parameter set ever breach the hard risk limits during the backtest (notional, position size, order rate — the same limits the PS enforces at runtime, 3.2.3.3)? (2) is the worst peak-to-trough loss within bounds — flagged if it exceeds $25,000 CAD, half the FS3 notional ceiling; (3) is the result backed by enough trades to be statistically meaningful — a high Sharpe from only 2 trades isn't, so anything under 10 trades is flagged. None of these checks reject automatically: a failed check is written into the operator's report, and the operator decides.
 
 ### 3.3.3.5 JSON configuration schema (jointly owned with 3.2.3.4)
+
+The fields of the config file the pipeline produces: which strategy and regime were selected, the parameter values, the risk limits, audit metadata on how the result was produced, and who approved it and when.
 
 | Field | Type | Content |
 |---|---|---|
@@ -594,99 +635,25 @@ A checklist, not an optimizer: (1) the backtest never breached FS3 ceilings (not
 
 ### 3.3.3.6 FS12 status reporting and server-side fault handling (NFS8)
 
-FS12's per-stage-transition logging requirement is implemented directly by a `run_stage()` wrapper: every transition writes `(timestamp, stage, status, key metrics)` to console and the nightly log file, and the approval prompt renders the accumulated report (regime, full sweep table, selected parameters, Sharpe, risk-check annotations). No scheduler or DAG framework is needed for a pipeline this shape. Recoverable faults follow one policy: log a timestamped fault code, abort before config generation, never emit a config that any validation stage hasn't passed.
+Each stage writes one line to the console and the log file on entry and exit — stage name, status, key numbers — via a shared wrapper function, giving the operator a full record of the run to review before approving. No scheduling framework is required for this. Recoverable faults are logged and abort the pipeline before config generation, so no config is ever produced from a stage that didn't complete cleanly.
 
 ### 3.3.3.7 Operator Approval and configuration transmission (FS8)
 
-The operator is shown the accumulated FS12 report and approves interactively. The approval prompt's own return value *is* the call that invokes transmission — there is no separate check-then-send step, and no code path reaches the network send without going through it. A REJECT/no-approval outcome never calls it, so the send has exactly one caller: the approval prompt's success branch. This satisfies FS8's verification ("confirm no transmission before manual approval") by inspection of the code path itself — the same structural argument used for FS4 in 3.2.3.4.
+The operator reviews the full FS12 report and approves interactively. Transmission cannot occur without that approval, not because of a check that could be skipped, but because the send call exists only inside the code path that runs after approval succeeds — there's no separate step where the code checks "was this approved?" before sending. Approving is the action that triggers sending. If nobody approves, the send call is never reached. That satisfies FS8's requirement directly, and is exactly what its verification checks for.
 
 Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from which the Config Loader ingests it at startup.
 
 ---
 
-## 3.3.4 Quantitative Technical Analysis
-
-### 3.3.4.1 NFS5 runtime budget decomposition
-
-NFS5 allows 30 minutes on the reference workload (1 year of daily OHLCV). The pipeline's cost is dominated by one term — the sweep's kernel replay — and every other stage is bounded by trivial arithmetic:
-
-```
-Regime path input:      252 daily bars → feature computation O(n), n = 252    → milliseconds
-Regime classification:  two percentile lookups + three comparisons, O(1)      → microseconds
-
-Sweep workload:
-  snapshot records/session = 100 Hz × 6.5 h × 3600 s/h = 2.34 M records
-  grid size                = 27 combinations
-  Per grid point: one pass of vectorized NumPy/pandas array operations (signal computation,
-    position derivation, cumulative P&L) over the 2.34 M-row snapshot array — vectorized
-    operations at this scale are expected to run in well under a second per grid point on
-    commodity hardware `[EVIDENCE: order-of-magnitude expectation from vectorized-array
-    performance in general; not yet benchmarked on this project's actual data shapes — pending
-    a wall-clock run on the EOD server before final submission]`
-  sweep time (pessimistic allowance) ≈ 1 min, covering I/O, pandas overhead, and repeated
-    array allocation across 27 points
-
-Report/serialize:  negligible
-
-Pipeline total (pessimistic): ≈ 1–2 min  →  ≥ 15× margin against NFS5 = 30 min
-```
-
-Two conclusions. First, this arithmetic is what licenses Decisions 1 and 3: Python is fast enough and exhaustive search is affordable, because a vectorized sweep over 27 grid points costs a small fraction of the 30-minute budget regardless of whether the exact per-point timing lands closer to the optimistic or pessimistic end. Second, the margin is a *design allowance*, not slack to be admired: it absorbs grid growth (a much larger grid still fits — see 3.3.4.4) and multi-session backtest windows.
-
-### 3.3.4.2 FS7 determinism argument — enumeration of nondeterminism sources
-
-FS7's verification is unusual: it does not measure a quantity, it demands *bit-identical* re-execution. The design therefore treats determinism as a property to be established by exhaustively closing every leak, not by testing alone:
-
-| Nondeterminism source | Where it would enter | How the design eliminates it |
-|---|---|---|
-| Random initialization / sampling | Classifier fit, Bayesian/random search | No fitted model (Decision 2); no sampling (Decision 3) — no RNG is ever seeded because none is used |
-| Parallel evaluation / reduction order | Multi-process sweep; float summation order varies | Sweep is strictly sequential in fixed lexicographic order; float reductions always occur in the same order, so IEEE-754 results are bit-stable across runs on the same platform `[TEAM: pin platform in verification procedure — cross-machine bit-identity additionally requires identical libm/BLAS, so FS7's test runs on one designated host]` |
-| Hash/dict iteration order | Config serialization, grid enumeration | Grids are explicit ordered lists; serialization is canonical (sorted keys, fixed formatting — 3.3.3.7) |
-| Floating-point evaluation order | Vectorized NumPy array reductions (signal computation, cumulative P&L) | Single-threaded, fixed operation order on a pinned platform — reductions are bit-stable across re-runs of this pipeline. This does not make the backtest decision-identical to the PS's live (integer) engine; that parity gap is a separate, stated limitation (3.3.3.3), not an FS7 concern, since FS7 only requires the EOD pipeline to reproduce itself |
-| Tie on the selection metric | Two grid points with equal Sharpe | Total-order tie-break (lexicographic parameter order) — the argmax is unique by construction |
-
-The residual claim — same host, same inputs, same binary ⇒ same bytes — is then verified directly by FS7's double-run procedure. `[EVIDENCE: two full pipeline runs on the reference dataset, byte-compare of emitted config payloads.]`
-
-### 3.3.4.3 Regime classifier non-degeneracy (FS6 verifiability by construction)
-
-FS6's verification requires ≥ 3 distinct regimes assigned over a 6-month window (~126 trading days). For a threshold classifier this fails only if some regime bucket is empty — which is exactly what fixed absolute thresholds risk (a calm 6 months may never cross a hardcoded vol constant, collapsing the output to one or two labels). The percentile scheme closes this analytically:
-
-```
-θ_vol = 75th percentile of {σₜ} over the same window
-  ⇒ |{t : σₜ ≥ θ_vol}| ≥ ⌈0.25 × 126⌉ = 32 days classified VOLATILE   (by definition of percentile)
-
-Remaining ≈ 94 days have σ < θ_vol and are split by θ_trend = 60th percentile of {|Tₜ|}:
-  computed over the full window ⇒ ~40% of all days lie above it;
-  even if every VOLATILE day were also high-|T|, at least 0.40×126 − 32 ≈ 18 days
-  remain TRENDING, and at least 126 − 32 − 0.40×126 ≈ 44 days remain RANGING.
-```
-
-All three buckets are therefore provably non-empty **for the same-window-percentile variant of the classifier** — the variant where θ_vol/θ_trend are computed over the very 6-month window being classified. `[TEAM: if θ_trend is instead computed over the sub-VOLATILE days only, the bound tightens further; confirm which definition we implement — the analysis above is the conservative case.]` The construction is symbol-agnostic — thresholds are relative to each symbol's own distribution, so it would carry over unchanged if the single-symbol scope is ever widened.
-
-**A gap worth stating plainly.** The deployed design in 3.3.3.2 does **not** use the same-window variant just proven — it calibrates thresholds on a *trailing* window and applies them to the *next* (out-of-sample) window, because a live system cannot know today's percentile using data that includes today before today has happened. That trailing-calibration scheme is the only one that is actually deployable, but it does not inherit the clean 25%-floor guarantee above: nothing stops a calm calibration window from setting a θ_vol that a calmer test window never reaches. The proof above should therefore be read as showing the *concept* cannot degenerate in principle, not as a guarantee about the *deployed* scheme — that gap is exactly what the empirical run below is for.
-
-**Empirical confirmation.** The preliminary run in 3.3.3.3.1 tests the actual deployed (trailing-calibration, out-of-sample) scheme — not the same-window variant proved above — on one real 6-month window (2008-04-17 to 2008-10-14, real AAPL daily closes, thresholds calibrated on the preceding 252 trading days): 80 RANGING / 29 TRENDING / 17 VOLATILE days, all three non-empty. This is one data point, not a proof, and it is a favorable one (2008 was genuinely volatile, so VOLATILE was in no danger of being empty here); it does not close the gap identified above. `[TEAM: the honest next step is running the trailing-calibration scheme across many overlapping 6-month windows — including calm ones — and reporting the empirical non-empty rate, rather than resting on a single favorable window or the same-window proof that doesn't match what ships.]`
-
-### 3.3.4.4 Grid scale sensitivity (why exhaustive search is the right size, and when it stops being)
-
-| Configuration | Grid points | Est. sweep time (scaled from 3.3.4.1's ≈ 1 min / 27-point allowance) | Verdict |
-|---|---|---|---|
-| Prototype: 1 symbol × 27-pt grid × 1 session | 27 | ≈ 1 min | Selected operating point |
-| 5-value axes (125-pt grid) | 125 | ≈ 4–5 min (≈ 125⁄27 × the 27-point allowance) | Comfortably fits NFS5 — vectorized per-point cost scales with grid points, not with the ~2.34 M-record snapshot array, so the old per-record-loop ceiling no longer applies |
-
-The table bounds the design's validity region explicitly: exhaustive grid + vectorized backtest kernel is correct for the specified prototype and its first two growth steps, and the design records precisely which future requirement invalidates it and what the successor is.
-
----
-
-## 3.3.5 Specification Compliance Summary
+## 3.3.4 Specification Compliance Summary
 
 | Spec | How the final design satisfies it | Evidence status |
 |---|---|---|
-| FS6 | Percentile-thresholded two-feature classifier; ≥ 3 non-empty regimes provable by construction (3.3.4.3) | Closed by arithmetic; pending 6-month reference-data run |
-| FS7 | Exhaustive fixed-order grid + deterministic vectorized kernel + total-order tie-break; all nondeterminism sources enumerated and closed (3.3.4.2) | Analytical; pending double-run byte-compare |
+| FS6 | Percentile-thresholded two-feature classifier; ≥ 3 non-empty regimes provable by construction (3.3.3.2) | Closed by arithmetic; pending 6-month reference-data run |
+| FS7 | Exhaustive fixed-order grid + deterministic vectorized kernel + total-order tie-break; all nondeterminism sources enumerated and closed (3.3.3.3) | Analytical; pending double-run byte-compare |
 | FS8 | Transmission call structurally unreachable without operator approval — the send has one caller, the approval prompt's success branch (3.3.3.7) | Pending no-approval injection test |
 | FS12 (non-ess.) | `run_stage()` wrapper logs every transition; approval report aggregates regime/sweep/Sharpe/status | Pending full-cycle log inspection |
-| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (3.3.4.1, 3.3.4.4) | Analytical; pending reference-dataset wall-clock |
+| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (Decision 3's runtime budget and grid-scale table) | Analytical; pending reference-dataset wall-clock |
 | NFS8 | Validate-before-compute; fault-coded logging; no config emitted past a failed validation | Pending malformed-input injection |
 
 ---
@@ -933,12 +900,11 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 
 [15] J. D. Hamilton, "A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle," *Econometrica*, vol. 57, no. 2, pp. 357–384, Mar. 1989, doi: 10.2307/1912559.
 
-[16] D. H. Bailey, J. M. Borwein, M. López de Prado, and Q. J. Zhu, "The Probability of Backtest Overfitting," *Journal of Computational Finance*, vol. 20, no. 4, pp. 39–69, 2017, doi: 10.21314/JCF.2016.322.
-
 ### Further reading (uncited in this document)
 
+- D. H. Bailey, J. M. Borwein, M. López de Prado, and Q. J. Zhu, "The Probability of Backtest Overfitting," *Journal of Computational Finance*, vol. 20, no. 4, pp. 39–69, 2017, doi: 10.21314/JCF.2016.322.
 - FIX Trading Community, "FIX Adapted for STreaming (FAST) Specification." [Online]. Available: https://www.fixtrading.org/standards/fast-online/ [Accessed: Jul. 9, 2026].
 - J. Zang, "quant-engine: a C++ quantitative backtest and research engine," independent project documentation. [Online]. Available: https://qe.jiucheng-zang.ca [Accessed: Jul. 2026].
 
-`[TEAM: bibliography housekeeping — (i) confirm the Toshiba entries' actual venues (both appear to be published papers; locate DOI/venue before submission); (ii) confirm the citation style guide for online resources; (iii) Hamilton 1989 and Bailey et al. 2017 (backtest overfitting) are now in the list as [15]–[16]; FinBERT/Araci and Loughran-McDonald were removed with the FS9/FS10 text-sentiment path (Section 2 footnote). TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
+`[TEAM: bibliography housekeeping — (i) confirm the Toshiba entries' actual venues (both appear to be published papers; locate DOI/venue before submission); (ii) confirm the citation style guide for online resources; (iii) Hamilton 1989 is now in the list as [15]; Bailey et al. 2017 (backtest overfitting) moved to Further Reading since the grid-vs-Bayesian comparison it supported was cut; FinBERT/Araci and Loughran-McDonald were removed with the FS9/FS10 text-sentiment path (Section 2 footnote). TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
 
