@@ -210,7 +210,7 @@ Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 
 ## 3.2.1 Overview and Specification Mapping
 
-The PS subsystem is the software half of the intraday trading loop, on the dual-core ARM Cortex-A9 of the XC7Z020. Core 1, isolated from the Linux scheduler, busy-polls the PL's snapshot registers, evaluates the active strategy, filters proposed orders through the Runtime Risk Guard, and writes risk-approved orders back via the register bank and doorbell. Core 0 owns everything latency-tolerant: config loading (FS4), the Execution Logger and export (FS5), the Debug-UART feed (FS11), fault logging, and HOLD-mode supervision.
+The PS subsystem is the software half of the intraday trading loop, on the dual-core ARM Cortex-A9 of the XC7Z020. Core 1, isolated from the Linux scheduler, busy-polls the PL's snapshot registers, evaluates the active strategy, filters proposed orders through the Runtime Risk Guard, and writes risk-approved orders back via the register bank and doorbell. Core 0 owns everything latency-tolerant: config loading (FS4), the Execution Logger and export (FS5), the Debug-UART feed (FS11), and HOLD-mode supervision.
 
 The division of labour with the PL follows one rule established in 3.1: the PL owns everything that must be deterministic at wire speed; the PS owns everything that must be **changeable** — strategy formulas, parameters, and risk limits are all expected to be replaced nightly by the EOD pipeline (Section 3.3), and iterating on them must not require re-synthesis.
 
@@ -223,7 +223,7 @@ The division of labour with the PL follows one rule established in 3.1: the PL o
 | **FS5** | Sole owner: bounded-memory persistence of decisions/outcomes/snapshots over > 10 M injected ticks, plus full-session export. |
 | **FS11 (non-ess.)** | Owner of the SoC side: real-time book/decision report over Debug UART. |
 | **NFS1** | Owns the dominant software segment of the ≤ 50 μs typical budget. |
-| **NFS4** | Primary owner: 6.5-hour session with no crash/hang/unrecovered error; software fault handling (malformed-config rejection at load time, fault-coded logging, continue-without-restart) is the supporting design feature (3.2.3.4). |
+| **NFS4** | Primary owner: 6.5-hour session with no crash/hang/unrecovered error. |
 
 Figure 3.3 shows the PS runtime structure. *(Figure placeholder — must reuse the block-diagram labels above; the register bank appears once, on the PL/PS boundary, with the Feature Parameters and Trade Decision arrows passing through it.)*
 
@@ -284,7 +284,7 @@ The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped throu
 | 0x00 | `SEQ` | R | Increments atomically with each snapshot commit; core 1 polls this |
 | 0x04–0x10 | `BEST_BID_PRICE`, `BEST_BID_QTY`, `BEST_ASK_PRICE`, `BEST_ASK_QTY` | R | Feature Parameters (top-of-book snapshot); extend if the Market Feature Builder emits more fields |
 | 0x14–0x18 | `TIMESTAMP_LO/HI` | R | PL hardware timestamp of the committing packet |
-| 0x20–0x2C | `DIAG_PARSE_ERR`, `DIAG_FCS_FAIL`, `DIAG_DROP_OOW`, `DIAG_TX_BACKPRESSURE` | R | Fault-path/NFS2 counters, read periodically by core 0 |
+| 0x20–0x2C | `DIAG_PARSE_ERR`, `DIAG_FCS_FAIL`, `DIAG_DROP_OOW`, `DIAG_TX_BACKPRESSURE` | R | Diagnostic counters (NFS2), read periodically by core 0 |
 | 0x40–0x4C | `ORD_SYMBOL_SIDE`, `ORD_QTY`, `ORD_PRICE`, `ORD_ID` | W | Order fields (FS13 source values) — the block diagram's "Trade Decision" arrow. `ORD_SYMBOL_SIDE` packs `symbol` in bits [15:0] and `side` in bits [23:16] (bits [31:24] reserved = 0), matching their widths in Table 3.1.5. |
 | 0x50 | `DOORBELL` | W | Write-1 launches the Order Emitter; **payload first, doorbell last** |
 | 0x54 | `TX_READY` | R | Egress flow-control invariant (see 3.2.4.1) |
@@ -322,9 +322,9 @@ Core 1 maintains a fixed, pre-allocated open-order table of 100 entries `{order_
 
 FS14/FS3(d) make "in-flight" a real, testable quantity, so the design fixes when an order stops being one: a PS-only modeled fill delay **T**. On submission, an order enters the table as in-flight and is treated as terminal after **T** elapses, at which point position and the execution-outcome log update and the terminal transition produces an execution-outcome record for FS5. This is deterministic, requires no protocol changes, and makes the FS14 verification procedure feasible by arithmetic (e.g., at 1,000 orders/s, **T = 0.1 s** drives the in-flight count to 100).
 
-### 3.2.3.4 Config Loader (FS4) and fault handling
+### 3.2.3.4 Config Loader (FS4)
 
-At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3.3.7), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is the malformed-config fault case: log fault code, refuse to start the polling loop, remain up for re-push — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
+At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3.3.7), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is logged, and the polling loop is refused to start — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
 
 ### 3.2.3.5 Execution Logger and Console (FS5, FS11)
 
@@ -425,7 +425,7 @@ Per-tick logging fails on both capacity and bandwidth, which is why the ring (3.
 | FS14 | Pre-allocated open-order table sized exactly to the FS3(d) ceiling; Risk Guard rejects at limit; modeled terminal transitions (3.2.3.3.1) | Pending limit-saturation injection test |
 | FS11 | Core-0 UART renderer off the shared ring | Pending live-session check |
 | NFS1 | FS2 path is the PS contribution; margin table 3.2.4.1 | Analytical |
-| NFS4 | Linux + isolated core, no hot-path allocation; fault paths per 3.2.3.4 (config-reject, fault-coded logging, `DIAG_*` counters surfaced via GP0); HOLD Mode as safe state | Pending 6.5 h soak |
+| NFS4 | Linux + isolated core, no hot-path allocation; HOLD Mode as safe state | Pending 6.5 h soak |
 
 # 3.3 EOD Server Pipeline Subsystem
 
@@ -448,7 +448,7 @@ This subsystem is directly responsible for the following specifications:
 | **FS7** | Sole owner: search ≥ 9 parameter combinations for the regime's strategy and select the metric-maximizing one, with deterministic (bit-identical) output. |
 | **FS8** | Sole owner of the gate: no configuration reaches the live system without explicit operator approval. (The PS Config Loader in 3.2.3.4 owns the *receiving* end of the chain of custody.) |
 | **FS12 (non-ess.)** | Sole owner: display and log pipeline stage, regime, selected parameters, backtest Sharpe, and approval status as each stage completes. |
-| **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes; server-side fault handling (malformed/missing input degrades safely — log fault code, emit no config) is the supporting design feature (3.3.3.6). |
+| **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes; input validation per 3.3.3.6. |
 
 Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from sessions traded against 3.4's replay-based simulator, which carries tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
 
@@ -520,7 +520,7 @@ The pipeline is a sequential staged program; Figure 3.5 shows the stage graph wi
 
 ### 3.3.3.1 Data import and Parameter Engineering
 
-Inputs are validated before any computation (fault-handling discipline, 3.3.3.6): schema check on the exported session archive, monotonic-timestamp check, minimum-history check. The floor is defined as **calibration window + 126 trading days**, not a fixed number: the calibration window (config-adjustable, ~60–90 trading days is enough for the percentile scheme in 3.3.3.2 to be statistically meaningful) has to sit entirely *before* the earliest day being classified, and FS6's own verification method classifies a 6-month (126 trading day) span — so the floor is tied to whatever calibration window is configured, and can never be tighter than what FS6's own verification procedure needs to run at all. Validation failure logs a fault code and aborts before config generation — bad data produces no candidate config, not a config built on garbage.
+Inputs are validated before any computation: schema check, monotonic-timestamp check, minimum-history check. The floor is defined as **calibration window + 126 trading days**, not a fixed number: the calibration window (config-adjustable, ~60–90 trading days is enough for the percentile scheme in 3.3.3.2 to be statistically meaningful) has to sit entirely *before* the earliest day being classified, and FS6's own verification method classifies a 6-month (126 trading day) span — so the floor is tied to whatever calibration window is configured, and can never be tighter than what FS6's own verification procedure needs to run at all. Validation failure aborts — no config from bad data.
 
 Two features are computed from daily OHLCV closes:
 
@@ -627,9 +627,9 @@ The fields of the config file the pipeline produces: which strategy and regime w
 | `provenance` | object | Data window, grid hash, backtest Sharpe, pipeline version — the FS12 record embedded for audit |
 | `approval` | object | `operator_id`, `timestamp` — appended only by the approval action (3.3.3.7) |
 
-### 3.3.3.6 FS12 status reporting and server-side fault handling
+### 3.3.3.6 FS12 status reporting
 
-Each stage writes one line to the console and the log file on entry and exit — stage name, status, key numbers — via a shared wrapper function, giving the operator a full record of the run to review before approving. No scheduling framework is required for this. Recoverable faults are logged and abort the pipeline before config generation, so no config is ever produced from a stage that didn't complete cleanly.
+Each stage logs entry/exit + key numbers via a shared wrapper. A failed stage emits no config.
 
 ### 3.3.3.7 Operator Approval and configuration transmission (FS8)
 
@@ -647,7 +647,7 @@ Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from
 | FS7 | Exhaustive fixed-order grid + deterministic vectorized kernel + total-order tie-break; all nondeterminism sources enumerated and closed (3.3.3.3) | Analytical; pending double-run byte-compare |
 | FS8 | Transmission call structurally unreachable without operator approval — the send has one caller, the approval prompt's success branch (3.3.3.7) | Pending no-approval injection test |
 | FS12 (non-ess.) | `run_stage()` wrapper logs every transition; approval report aggregates regime/sweep/Sharpe/status | Pending full-cycle log inspection |
-| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (Decision 3's runtime budget and grid-scale table); validate-before-compute fault discipline means a failed stage emits no config | Analytical; pending reference-dataset wall-clock |
+| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (Decision 3's runtime budget and grid-scale table) | Analytical; pending reference-dataset wall-clock |
 
 ---
 
