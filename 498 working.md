@@ -74,8 +74,7 @@ This subsystem is directly responsible for the following specifications:
 | **NFS1** | Owns the two PL segments (RX decode, TX encode) of the ≤ 50 μs end-to-end budget (300 μs ceiling applies to the superseded interrupt design)[cite: 11]. |
 | **NFS2** | Owns link integrity: zero unexplained frame drops over a 10-minute window[cite: 11]. |
 | **NFS6** | Owns the resource envelope: < 75% LUT, < 85% BRAM at 125 MHz with WNS > 0[cite: 11]. |
-| **NFS9** | Owns ingest throughput: ≥ 1.2 M msg/s sustained at line rate without MAC RX stall[cite: 11]. |
-| **NFS8 (partial)** | Owns the hardware fault path: checksum-fail discard and FIFO-overflow handling with fault counters[cite: 11]. |
+| **Fault handling (partial)** | Owns the hardware fault path: checksum-fail discard and FIFO-overflow handling with fault counters[cite: 11]. |
 | **NFS4 (partial)** | Hardware fault paths (FCS discard, FIFO-overflow handling, drop counters) keep line-rate faults from escalating into a session-ending hang; primary ownership of the 6.5-hour stability requirement remains with the PS (3.2.1)[cite: 11]. |
 
 Figure 3.1 shows the PL block structure and the shared AXI-Lite register bank at the PS boundary, using the stage names adopted throughout this section (Protocol Decode / Build Order Book / Protocol Encode)[cite: 11].
@@ -103,14 +102,14 @@ Four significant design decisions shaped this subsystem[cite: 11]. Quantitative 
 #### Decision 2 — Parse architecture: store-and-forward vs. cut-through streaming parse
 
 *   **Alternatives:** Store-and-forward buffers the complete frame before decoding; cut-through streams and slices fields in real time at fixed byte offsets[cite: 11].
-*   **Integrated Line-Rate Throughput Analysis (NFS9):** The maximum theoretical packet rate of a 1 Gbps link for our 24-byte payload configuration is derived below[cite: 11]:
+*   **Integrated Line-Rate Throughput Analysis :** The maximum theoretical packet rate of a 1 Gbps link for our 24-byte payload configuration is derived below[cite: 11]:
     $$\text{Frame Over Wire} = 8\ \text{Preamble} + 14\ \text{Ethernet} + 20\ \text{IPv4} + 8\ \text{UDP} + 24\ \text{Payload} + 4\ \text{FCS} + 12\ \text{IFG} = 90\ \text{bytes} = 720\ \text{bits}$$[cite: 11]
     $$\text{Line Rate Saturation Limit} = 10^9\ \text{bits/sec} \div 720\ \text{bits} = 1,388,888\ \text{packets/second}$$[cite: 11]
     Serializing frame buffering under a store-and-forward design adds a 560 ns transmission serialization penalty (70 bytes post-preamble streaming at 1 octet/cycle), consuming over a third of the remaining budget[cite: 11].
 *   **Integrated Latency Path Decomposition (FS1):** Cut-through parsing is selected because fixed offsets permit deterministic bit slicing concurrently with line arrival, removing Look-Ahead serialization[cite: 11]. The absolute step-by-step custom hardware logic latency totals exactly 77 clock cycles (616 ns): (1) Frame reception streaming: 560 ns (70 bytes), (2) FCS validation latch: 16 ns, (3) Tournament compare network reduction: 32 ns, and (4) Register bank synchronization: 8 ns[cite: 11]. Accounting for the vendor-spec MAC core ingestion delay, sensitivity analysis establishes the following final path budgets against the 1.5 μs functional specification ceiling[cite: 11]:
     *   *Optimistic Ingest Assumption (100 ns):* $616\ \text{ns} + 100\ \text{ns} = 716\ \text{ns}$ (**52% Safety Margin**)[cite: 11].
     *   *Pessimistic Ingest Assumption (400 ns):* $616\ \text{ns} + 400\ \text{ns} = 1,016\ \text{ns}$ (**32% Safety Margin**)[cite: 11].
-*   **Commit Policy:** To ensure data integrity, fields are held in speculative staging registers and committed to the order book only upon an Ethernet Frame Check Sequence (FCS) pass signal[cite: 11]. On FCS fail, the frame is safely discarded, and a `parse_error` counter increments, fulfilling the fault-tolerant criteria of NFS8[cite: 11].
+*   **Commit Policy:** To ensure data integrity, fields are held in speculative staging registers and committed to the order book only upon an Ethernet Frame Check Sequence (FCS) pass signal[cite: 11]. On FCS fail, the frame is safely discarded, and a `parse_error` counter increments, fulfilling the fault-tolerant criteria of the fault-handling path[cite: 11].
 
 #### Decision 3 — Order book storage: BRAM-indexed structure vs. fixed register array
 
@@ -145,7 +144,7 @@ The receive path is structured as a five-stage streaming pipeline running at a c
 1. **MAC RX (Xilinx TEMAC):** Handles RGMII DDR capture from the external PHY, preamble alignment, and FCS tracking, streaming data out over its AXI4-Stream RX interface[cite: 11]. Non-matching destination MAC addresses are filtered out immediately[cite: 11].
 2. **IP/UDP Header Parse:** Fixed-offset validation of EtherType (0x0800), IP protocol (17), destination IP, and destination UDP port against compile-time constants[cite: 11]. The UDP checksum is bypassed because payload integrity on this single-segment point-to-point link is covered by the Ethernet FCS[cite: 11].
 3. **Protocol Decode:** Executes real-time bit-slicing of the incoming custom payload directly into staging registers as bytes arrive[cite: 11].
-4. **Commit gate:** On TEMAC's `tuser` frame-good signal at `tlast`, the staged event commits; on frame-bad, discard + `parse_error` increment (NFS8)[cite: 11].
+4. **Commit gate:** On TEMAC's `tuser` frame-good signal at `tlast`, the staged event commits; on frame-bad, discard + `parse_error` increment (fault-handling path)[cite: 11].
 5. **Order book update:** Aggregates the committed L3 event (keyed by `order_id`) into the affected side/level[cite: 11]. Extracting the new top-of-book occurs via combinational reduction, driving an atomic commit to the register bank and a single-cycle increment of the `seq` register[cite: 11].
 
 #### 3.1.3.2 Packet formats (FS13 interface contract)
@@ -184,7 +183,7 @@ Table 3.1.5: Order Book Register Sizing & Diagnostic Layout
 | **Bid book** | 10 | price_cents (32b), aggregate_qty (32b) | Tracks highest active bid levels[cite: 11] |
 | **Ask book** | 10 | price_cents (32b), aggregate_qty (32b) | Tracks lowest active ask levels[cite: 11] |
 | **Top-of-book snapshot** | 1 | best_bid_price, best_bid_qty, best_ask_price, best_ask_qty | Committed atomically to AXI-Lite register bank on every tick[cite: 11] |
-| **Diagnostic counters** | 4+ | parse_error, fcs_fail, dropped_out_of_window, tx_backpressure | NFS2/NFS8 system observability[cite: 11] |
+| **Diagnostic counters** | 4+ | parse_error, fcs_fail, dropped_out_of_window, tx_backpressure | NFS2 / fault-path observability[cite: 11] |
 
 #### 3.1.3.4 PS interface and transmission pipeline
 
@@ -207,8 +206,6 @@ Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 | **FS13** | Egress formatting matching Table 3.1.4 byte-offsets is hardcoded into sequential register arrays[cite: 11]. | Wireshark inspection of simulated order frame[cite: 11]. | **Y**[cite: 11] |
 | **NFS1** | Hardware RX (0.61 μs) and TX (0.65 μs) path budgets consume less than 3% of the absolute system latency budget[cite: 11]. | Synchronized hardware timestamp capture loop[cite: 11]. | **Y**[cite: 11] |
 | **NFS6** | Gate-level resource footprints map to approximately 11% of available fabric resources on the target device[cite: 11]. | Vivado post-implementation utilization summary report[cite: 11]. | **Y**[cite: 11] |
-| **NFS9** | Parallel pipelined II=1 logic natively routes data at full wire-speed line limits (1.389 Mpps) without drops[cite: 11]. | PCAP wire-rate injection test via drop counters[cite: 11]. | **Y**[cite: 11] |
-
 # 3.2 PS (ARM OS Layer) Strategy & Risk Subsystem
 
 ## 3.2.1 Overview and Specification Mapping
@@ -862,4 +859,3 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 - J. Zang, "quant-engine: a C++ quantitative backtest and research engine," independent project documentation. [Online]. Available: https://qe.jiucheng-zang.ca [Accessed: Jul. 2026].
 
 `[TEAM: bibliography housekeeping — (i) confirm the Toshiba entries' actual venues (both appear to be published papers; locate DOI/venue before submission); (ii) confirm the citation style guide for online resources; (iii) Hamilton 1989 is now in the list as [15]; Bailey et al. 2017 (backtest overfitting) moved to Further Reading since the grid-vs-Bayesian comparison it supported was cut; FinBERT/Araci and Loughran-McDonald were removed with the FS9/FS10 text-sentiment path (Section 2 footnote). TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
-
