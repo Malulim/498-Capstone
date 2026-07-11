@@ -210,20 +210,20 @@ Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 
 ## 3.2.1 Overview and Specification Mapping
 
-The PS subsystem is the software half of the intraday trading loop, on the dual-core ARM Cortex-A9 of the XC7Z020. Core 1, isolated from the Linux scheduler, busy-polls the PL's snapshot registers, evaluates the active strategy, filters proposed orders through the Runtime Risk Guard, and writes risk-approved orders back via the register bank and doorbell. Core 0 owns everything latency-tolerant: config loading (FS4), the Execution Logger and export (FS5), the Debug-UART feed (FS11), and HOLD-mode supervision.
+The PS subsystem is the software half of the intraday trading loop on the XC7Z020's dual-core ARM Cortex-A9. Core 1 is isolated from the Linux scheduler and owns the hot path: busy-poll the PL snapshot registers, evaluate the active strategy, apply the Runtime Risk Guard, and write approved order fields back through the register bank and doorbell. Core 0 owns latency-tolerant work: configuration loading, log draining/export, Debug-UART reporting, and session supervision.
 
-The division of labour with the PL follows one rule established in 3.1: the PL owns everything that must be deterministic at wire speed; the PS owns everything that must be **changeable** — strategy formulas, parameters, and risk limits are all expected to be replaced nightly by the EOD pipeline (Section 3.3), and iterating on them must not require re-synthesis.
+The division of labour with the PL follows one rule established in 3.1: the PL owns wire-speed determinism; the PS owns session-to-session changeability. Strategy formulas, parameters, and risk limits are replaced by the EOD pipeline (Section 3.3), so iterating on them must not require FPGA re-synthesis.
 
 | Spec | Role of PS subsystem |
 |---|---|
-| **FS2** | Sole owner of the software segment: observed snapshot update → decision (BUY/SELL/HOLD) → order handed to PL, inside the ≤ 30 μs budget. |
-| **FS3** | Sole owner: reject orders violating notional (> $50,000 CAD), position (> 1,000 shares), rate (> 1,000 orders/s), or in-flight (> 100) limits, with logged reason codes. |
-| **FS14** | Sole owner: track every in-flight order's state for the traded symbol, up to the configured capacity, and expose terminal outcomes to the logger. |
-| **FS4** | Sole owner: load and validate the externally supplied strategy configuration before any market data is processed. |
-| **FS5** | Sole owner: bounded-memory persistence of decisions/outcomes/snapshots over > 10 M injected ticks, plus full-session export. |
-| **FS11 (non-ess.)** | Owner of the SoC side: real-time book/decision report over Debug UART. |
-| **NFS1** | Owns the dominant software segment of the ≤ 50 μs typical budget. |
-| **NFS4** | Primary owner: 6.5-hour session with no crash/hang/unrecovered error. |
+| **FS2** | Software segment: snapshot update -> BUY/SELL/HOLD -> PL order handoff within the 30 μs budget. |
+| **FS3** | Risk rejection for notional, position, order-rate, and in-flight limits, with logged reason codes. |
+| **FS14** | In-flight order state for up to 100 concurrent orders, including terminal outcomes. |
+| **FS4** | Validated strategy configuration before any market data is processed. |
+| **FS5** | Bounded-memory persistence of decisions/outcomes/snapshots over >10 M ticks, plus export. |
+| **FS11 (non-ess.)** | Real-time book/decision report over Debug UART. |
+| **NFS1** | Dominant software contribution to the 50 μs typical end-to-end budget. |
+| **NFS4** | Primary 6.5-hour session-stability owner. |
 
 Figure 3.2 shows the PS runtime structure. *(Figure placeholder — must reuse the block-diagram labels above; the register bank appears once, on the PL/PS boundary, with the Feature Parameters and Trade Decision arrows passing through it.)*
 
@@ -231,14 +231,16 @@ Figure 3.2 shows the PS runtime structure. *(Figure placeholder — must reuse t
 
 ## 3.2.2 Engineering Design Process
 
+Quantitative analysis for latency, interface capacity, Risk Guard cost, and logging-memory bounds is integrated directly into the decisions and final-design elements it supports.
+
 ### Decision 1 — Hardware/software boundary: strategy in PL vs. strategy in PS
 
 | Alternative | Description | Outcome |
 |---|---|---|
 | Strategy in PL | Implement decision rules as fabric logic; sub-microsecond tick-to-order. | **Rejected.** Strategy formulas, thresholds, and the active strategy identity change nightly via the EOD JSON config (FS4/FS8). A PL implementation would either require re-synthesis per change (hours per iteration, incompatible with the EOD cycle) or a parameterized rule engine in fabric whose design and verification cost exceeds the entire remaining PL budget. Industry practice concurs: fixed protocol/risk primitives migrate to hardware, iterating alpha logic stays in software. |
-| Strategy in PS (selected) | Evaluate rules on the Cortex-A9 against the observed snapshot. | **Selected.** A software strategy is reconfigured by rewriting a struct, tested with host-compiled unit tests, and debugged with standard tooling. The cost — microseconds instead of nanoseconds — is affordable: QTA 3.2.4.1 shows the FS2 budget closes with ~5.5× margin. |
+| Strategy in PS (selected) | Evaluate rules on the Cortex-A9 against the observed snapshot. | **Selected.** A software strategy is reconfigured by rewriting a struct, tested with host-compiled unit tests, and debugged with standard tooling. Decision 3's latency budget shows the software path still closes with about 5.5x margin. |
 
-This decision is the reason FS2's budget (30 μs) is roughly an order of magnitude looser than FS1's (1.5 μs): the specs deliberately price in the software boundary, and Decisions 2–3 carry the burden of proving the priced-in budget is achievable.
+This decision explains why FS2's 30 μs budget is roughly an order of magnitude looser than FS1's 1.5 μs budget: the specification deliberately prices in the software boundary, and Decisions 2-3 prove that the priced-in boundary is still feasible.
 
 ### Decision 2 — Operating environment: bare-metal vs. Linux vs. Linux with core isolation
 
@@ -250,30 +252,48 @@ This decision is the reason FS2's budget (30 μs) is roughly an order of magnitu
 | NFS4 6.5-hour robustness path (15%) | All failure handling hand-rolled | Mature, observable (logs, watchdogs) |
 | **Weighted result (1–5 scale)** | 2.6 | **4.1 — Selected** |
 
-Scoring: cost-type criteria score higher when the cost is lower; bare-metal = 0.3×5 + 0.3×1 + 0.25×2 + 0.15×2 = 2.6, Linux = 0.3×2 + 0.3×5 + 0.25×5 + 0.15×5 = 4.1.
-
-Bare-metal prices the FS4/FS5/FS8 network stack and filesystem in as a porting project that adds no marks. Linux is selected with the explicit obligation to fix its hot-path weakness: core 1 is pulled out of the scheduler entirely via `isolcpus`, which is what Decision 3 relies on. The distribution is PetaLinux, chosen over a generic Ubuntu-based image for its Xilinx-supplied BSP/device-tree support of the AXI-Lite GP port and `isolcpus`; PREEMPT_RT isn't needed since the isolated core never re-enters the scheduler.
+Linux is selected only with the explicit constraint that the hot path does not run as ordinary scheduled userspace. Core 1 is removed from normal scheduling with `isolcpus`, which Decision 3 relies on; core 0 keeps Linux's filesystem, network, logging, and UART advantages for FS4/FS5/FS11/NFS4. PetaLinux is preferred over a generic image because its Xilinx BSP/device-tree support already covers the AXI-Lite GP port and CPU-isolation workflow. PREEMPT_RT is unnecessary because the isolated core is designed not to re-enter the scheduler during the hot path.
 
 ### Decision 3 — Hot-path interface and event delivery: interrupt + DMA ring vs. busy-poll register bank
 
-FS2 caps the software path at ≤ 30 μs.
+FS2 caps the software path at 30 μs. The selected design must therefore avoid any wakeup path whose latency is comparable to the whole budget.
 
 | Alternative | Implementation cost | Outcome |
 |---|---|---|
 | Interrupt + DMA ring | DMA IP + driver + coherency | Rejected — interrupt wakeup alone risks consuming most of the budget |
 | **Busy-poll + register bank + doorbell (selected)** | Wizard-generated AXI-Lite slave; zero driver, zero coherency | **Selected** |
 
-**Interrupts are out.** Linux IRQ→userspace wakeup is taken as 10–40 μs — a working figure whose exact value the argument does not hang on: even the optimistic end consumes a third of the FS2 budget before any work happens, and the design case needs only that order of magnitude. This isn't just this project's estimate: Leber et al. trace interrupts' high latency to the context switch itself [1], Morris et al. poll a memory queue for the same reason [4], and Toshiba's production system polls FIFOs in hardware rather than using interrupts [8]. The replacement is busy-poll: core 1 is pulled out of the scheduler (`isolcpus`) and spins on new data instead.
+Linux IRQ-to-userspace wakeup is treated as 10-40 μs: even the optimistic end consumes one third of FS2 before strategy logic begins. This is consistent with the broader low-latency pattern: Leber et al. identify context switching as the interrupt cost [1], Morris et al. use polling for host-side market data [4], and Toshiba's production systems avoid software interrupts on the trading path [8]. Core 1 therefore busy-polls `SEQ` over M_AXI_GP0 instead of sleeping.
 
-**DMA loses its rationale once a core is already dedicated to the wait — and its exact latency doesn't need to be pinned down to see that.** DMA earns its complexity by moving bulk data without CPU involvement; at a 16–24 B payload, there's nothing to earn, whatever DMA's own latency turns out to be once synthesized. The PL exposes the snapshot as AXI-Lite registers plus an incrementing `seq`; core 1 polls `seq` over M_AXI_GP0. Egress is symmetric — the PS writes order fields then a doorbell register, whose write strobe launches the PL encoder; payload-first/doorbell-last makes torn sampling impossible without a lock.
+DMA also loses its main benefit once a core is already dedicated to waiting: the snapshot is only 16-24 B, so bulk transfer hardware adds driver/coherency work without raising the strategy's processing ceiling. The PL exposes a register snapshot plus `SEQ`; egress is symmetric, with payload fields written first and `DOORBELL` last.
 
-The register path isn't claimed to win on speed — it's claimed to be cheap enough to build and verify that the comparison doesn't need to be won on speed, which is the right target for this team and schedule.
+30 μs is about 23,000 cycles at 766 MHz. Allowing about 1 μs for the PL egress tail leaves about 29 μs for software:
+
+| Stage | Estimate |
+|---|---|
+| Detect new `SEQ` | ~0.15-0.3 μs |
+| Snapshot read + seqlock re-read | ~1-1.8 μs |
+| Strategy evaluation | <= ~1 μs |
+| Runtime Risk Guard | << 0.1 μs |
+| Logger record write | <= ~0.5 μs |
+| Order-field writes + doorbell | ~0.5-1 μs |
+| **Software total** | **<= ~5 μs, about 5.5x margin against the ~29 μs share** |
+
+The same arithmetic explains why conflation is acceptable for the current prototype. Snapshot reads observe at roughly 500-670 K snapshots/s and full decision iterations run at >=200 K decisions/s, while the wire ceiling from 3.1 Decision 2 is 1.389 M ticks/s. The CPU, not the register interface, is the bottleneck; a DMA ring would mostly queue stale ticks. The selected register path therefore keeps only the latest snapshot.
+
+| Condition | Register path conclusion |
+|---|---|
+| Current spec: 1 symbol, top-of-book, conflation acceptable | Adequate; ~1.5-2 μs/read with >=5x FS2 margin. |
+| Payload > ~100 B/event, e.g., 10-level depth | Migrate to a GP-mapped dual-port BRAM window. |
+| Per-tick consumption required, no conflation | DMA ring plus faster software consumer required; out of prototype scope. |
+
+TX contention is non-binding: FS3 caps orders at 1,000/s, while a packet transmit is about 1 μs, giving roughly 1000x spacing margin. `TX_READY` is retained as a correctness invariant rather than a performance mechanism.
 
 ---
 
 ## 3.2.3 Final Design Details
 
-The six subsections below follow one tick's path through core 1: the register bank delivers the snapshot (3.2.3.1), the Strategy Engine turns it into a decision (3.2.3.2), the Risk Guard filters that decision (3.2.3.3) and the open-order table tracks what happens to it (3.2.3.3.1); the Config Loader (3.2.3.4) governs the parameters everything above uses, the Execution Logger (3.2.3.5) records every step, and HOLD Mode (3.2.3.6) is the session-level fallback that can override the whole chain.
+The final design follows one tick through the software path: the register bank delivers the snapshot, the Strategy Engine decides, the Runtime Risk Guard filters and tracks orders, the Config Loader supplies all session parameters, and the Execution Logger records the result.
 
 ### 3.2.3.1 The PL/PS register bank and access protocol (interface contract)
 
@@ -281,151 +301,67 @@ The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped throu
 
 | Offset | Register | Dir (PS view) | Semantics |
 |---|---|---|---|
-| 0x00 | `SEQ` | R | Increments atomically with each snapshot commit; core 1 polls this |
-| 0x04–0x10 | `BEST_BID_PRICE`, `BEST_BID_QTY`, `BEST_ASK_PRICE`, `BEST_ASK_QTY` | R | Feature Parameters (top-of-book snapshot); extend if the Market Feature Builder emits more fields |
+| 0x00 | `SEQ` | R | Atomic snapshot sequence; core 1 polls this |
+| 0x04-0x10 | `BEST_BID_PRICE`, `BEST_BID_QTY`, `BEST_ASK_PRICE`, `BEST_ASK_QTY` | R | Top-of-book Feature Parameters |
 | 0x14–0x18 | `TIMESTAMP_LO/HI` | R | PL hardware timestamp of the committing packet |
 | 0x20–0x2C | `DIAG_PARSE_ERR`, `DIAG_FCS_FAIL`, `DIAG_DROP_OOW`, `DIAG_TX_BACKPRESSURE` | R | Diagnostic counters (NFS2), read periodically by core 0 |
-| 0x40–0x4C | `ORD_SYMBOL_SIDE`, `ORD_QTY`, `ORD_PRICE`, `ORD_ID` | W | Order fields (FS13 source values) — the block diagram's "Trade Decision" arrow. `ORD_SYMBOL_SIDE` packs `symbol` in bits [15:0] and `side` in bits [23:16] (bits [31:24] reserved = 0), matching their widths in Table 3.1.4. |
-| 0x50 | `DOORBELL` | W | Write-1 launches the Order Emitter; **payload first, doorbell last** |
-| 0x54 | `TX_READY` | R | Egress flow-control invariant (see 3.2.4.1) |
+| 0x40–0x4C | `ORD_SYMBOL_SIDE`, `ORD_QTY`, `ORD_PRICE`, `ORD_ID` | W | FS13 order fields; `symbol` and `side` packed into `ORD_SYMBOL_SIDE` |
+| 0x50 | `DOORBELL` | W | Write-1 launches Order Emitter; payload first, doorbell last |
+| 0x54 | `TX_READY` | R | Egress flow-control invariant |
 
-**Consistency and conflation.** PL commits are single-clock-edge atomic, so tearing can only happen on the PS side, where reading 4–6 registers spans ~1 μs across several AXI transactions; core 1 guards against it with a seqlock (read `SEQ`, read fields, re-read `SEQ`, retry on mismatch). Egress needs no lock — the PL samples order fields only on the doorbell strobe. The bank also holds only the latest snapshot: if ticks outrun the polling loop, intermediate snapshots are overwritten rather than queued, so the strategy always decides on the current book. This doesn't affect PL-side ingest — the PL still books every packet at line rate (3.1.2, Decision 2); conflation applies only to what the PS samples, and it is a consequence of keeping the strategy in PS software (Decision 1), not a general HFT norm — see the trade-off discussion in 3.2.4.1.
+PL commits are single-clock-edge atomic. PS-side multi-read consistency is protected by a seqlock: read `SEQ`, read fields, re-read `SEQ`, and retry if the value changed. Egress needs no lock because the PL samples order fields only on the doorbell strobe.
 
 ### 3.2.3.2 Strategy Engine (Plug-In Execution)
 
 The engine is a table dispatch: the active strategy ID (from the FS4 config) indexes a function table; each strategy is a pure function of (snapshot, rolling state, parameters) → {BUY, SELL, HOLD} + order fields. Rolling state is fixed-size (e.g., a lookback ring of midprices), so per-tick cost is O(1) and independent of session length.
 
-| Regime | Strategy | Input signals | Decision rule |
-|---|---|---|---|
-| Trending | Momentum | Midprice sequence over configured lookback | `m = mid_t − mid_{t−L}`; BUY if `m ≥ +θ_entry`, SELL if `m ≤ −θ_entry`, else HOLD |
-| Ranging | Mean Reversion | Midprice deviation from moving average | `d = mid_t − SMA_W(mid)`; BUY if `d ≤ −θ_dev`, SELL if `d ≥ +θ_dev`, else HOLD (trade toward the mean) |
-| Volatile | Defensive | Spread, volatility flag, position state | If `spread ≥ spread_floor` or the vol flag is set: suppress new entries and emit only position-reducing orders toward flat; else HOLD |
+| Regime | Strategy | Core rule |
+|---|---|---|
+| Trending | Momentum | BUY/SELL from configured midprice lookback delta. |
+| Ranging | Mean Reversion | Trade toward the configured moving-average deviation band. |
+| Volatile | Defensive | Suppress entries, allow only position-reducing orders toward flat. |
 
-`mid` is held in half-cent units (`best_bid + best_ask`) so the arithmetic stays integer, like all prices from the PL — this avoids FPU state on the isolated core and makes decisions bit-reproducible for backtest cross-validation, extending FS7's determinism to the SoC side. Every window, threshold, and position scalar loads from the FS4 JSON config — the parameter names are exactly the axes swept in 3.3.3.3 (`lookback/entry_thresh/pos_scalar`, `window/dev_thresh/pos_scalar`, `spread_floor/vol_cutoff/pos_scalar`) — so tuning never requires recompilation. The formulas are deliberately simple: per-strategy sophistication lives in the EOD parameter sweep (3.3), not the intraday rule; the design's contribution is the deterministic, reconfigurable evaluation machinery, not the alpha.
+`mid` is held in half-cent units (`best_bid + best_ask`) so arithmetic remains integer and bit-reproducible on the isolated core. Every window, threshold, and position scalar loads from the FS4 JSON config using the same parameter names swept in 3.3.3.3, so tuning never requires recompilation. The design contribution is deterministic, reconfigurable evaluation machinery; alpha selection belongs to the EOD sweep.
 
 ### 3.2.3.3 Runtime Risk Guard (FS3)
 
-The guard lives in PS software, executed unconditionally after every non-HOLD decision, in the same thread as the strategy — not in PL fabric. Same-thread placement guarantees no order path can bypass it, which is simpler to verify against FS3 than a split HW/SW trust boundary; a PL guard would also need its own writable-register interface for limits that are EOD-configurable, and QTA 3.2.4.1 shows the software cost (~25–30 cycles, under 0.1% of the FS2 budget) leaves no latency case for hardware anyway. The PL still holds a residual structural guard: the Order Emitter can only transmit packets assembled from fields the PS wrote through the register bank, in the FS13 fixed format — malformed egress is impossible by construction.
+The guard executes unconditionally after every non-HOLD decision in the same thread as the strategy, so no order path can bypass it. Keeping the guard in PS software also keeps FS3 limits EOD-configurable; a PL guard would need its own writable-register interface. The software cost is bounded at about 23-29 cycles: multiply/compare for notional, add/compare for position, fixed-point token-bucket update for rate, and one occupancy compare for in-flight count. At 766 MHz this is about 0.03-0.04 μs, under 0.1% of the FS2 budget, leaving no latency case for hardware risk checks.
 
 | Check | Rule | Mechanism |
 |---|---|---|
 | Notional | qty × price ≤ $50,000 CAD limit (configurable) | 32×32→64-bit multiply, one compare |
 | Position | \|position ± qty\| ≤ 1,000 shares | Signed accumulate against local position state, range-checked against ±1,000 (two compares) |
-| Rate | ≤ 1,000 orders/s | Token bucket: capacity 1,000, refill from the global timer via fixed-point multiply-shift — no divides on the hot path (3.2.4.1) |
-| In-flight | in-flight count ≤ 100 | Compare against open-order table occupancy counter (increment on doorbell; decrement on terminal transition — 3.2.3.3.1) |
-
-Rejections write a reason-coded record to the Execution Logger (FS3's "logged reason code") and never reach the doorbell. A REJECT may also assert the Runtime Trigger into HOLD Mode (3.2.3.6). Limits load from the FS4 config and are immutable during a session.
-
-### 3.2.3.3.1 Open-order table (FS14)
+| Rate | ≤ 1,000 orders/s | Token bucket with fixed-point refill; no divide on the hot path |
+| In-flight | in-flight count ≤ 100 | Compare against open-order table occupancy |
 
 Core 1 maintains a fixed, pre-allocated open-order table of 100 entries `{order_id, side, qty, price, submit_timestamp, state}` for the traded symbol — sized exactly to FS3(d)/FS14's in-flight ceiling, since the Risk Guard's in-flight check rejects before insertion and the table never needs to hold more than that.
 
-FS14/FS3(d) make "in-flight" a real, testable quantity, so the design fixes when an order stops being one: a PS-only modeled fill delay **T**. On submission, an order enters the table as in-flight and is treated as terminal after **T** elapses, at which point position and the execution-outcome log update and the terminal transition produces an execution-outcome record for FS5. This is deterministic, requires no protocol changes, and makes the FS14 verification procedure feasible by arithmetic (e.g., at 1,000 orders/s, **T = 0.1 s** drives the in-flight count to 100).
+FS14/FS3(d) require "in-flight" to be testable, so the design fixes terminal timing with a PS-only modeled fill delay **T**. On submission, an order enters the table as in-flight; after **T**, position and the outcome log update, producing the FS5 execution-outcome record. At 1,000 orders/s, **T = 0.1 s** drives the in-flight count to the 100-order ceiling for verification. Rejections write reason-coded records and never reach the doorbell. A configured rejection pattern, `>= 3` REJECTs within 10 s by default, latches HOLD Mode until operator clearance; an EOD "REJECT / No Approval" outcome uses the same latch. HOLD needs no PL cooperation because it is simply the absence of a doorbell write.
 
 ### 3.2.3.4 Config Loader (FS4)
 
-At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3.3.7), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is logged, and the polling loop is refused to start — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
+At startup, before core 1 begins polling, the loader validates the JSON configuration's schema, ranges, strategy parameters, and risk limits, then populates the strategy table and Risk Guard. Any validation failure is logged and the polling loop is refused to start: the system never trades on defaults. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument and the PS receiving-side half of the FS8 chain of custody.
 
 ### 3.2.3.5 Execution Logger and Console (FS5, FS11)
 
-The logger is pure software: core 1 writes into a fixed, pre-allocated 256 MB ring in cached DDR3 (no malloc on the hot path, no OOM by construction); the PL isn't involved. A full per-tick log doesn't fit the budget (3.2.4.2), so the ring logs every decision/outcome record (rate capped by FS3's 1,000 orders/s) plus book snapshots sampled at 100 Hz and on every order event (working figures, pending a cited source). Core 0 handles everything off the hot path: draining the ring to eMMC continuously, the end-of-session export over PS GbE, periodic `DIAG_*` sampling into the log, and the FS11 console feed — a 1 Hz rendering of book top and recent decisions over Debug UART, reading the same ring at zero cost to core 1.
+The logger is pure software: core 1 writes fixed 128 B records into a pre-allocated 256 MB cached-DDR ring, with no hot-path allocation and therefore no hot-path OOM. Each record is one of: decision, execution outcome, sampled snapshot, Risk Guard reject, or fault. The fixed schema groups type/decision metadata, strategy/reason codes, PL and CPU timestamps, top-of-book fields, emitted-order fields, position/in-flight/PnL state, and reserved growth space.
 
-**Execution record schema (frozen — 128 B fixed).** One record per strategy decision, execution outcome, sampled snapshot, Risk Guard REJECT, or fault event, written by core 1 as a single fixed-size struct copy:
-
-| Field | Offset (B) | Size (B) | Content |
-|---|---|---|---|
-| `record_type` | 0 | 1 | 0x01 DECISION, 0x02 OUTCOME, 0x03 SNAPSHOT, 0x04 REJECT, 0x05 FAULT |
-| `decision` | 1 | 1 | 0x00 HOLD, 0x01 BUY, 0x02 SELL (0x00 for non-decision records) |
-| `strategy_id` | 2 | 1 | Active strategy index (FS4 config) |
-| `reason_code` | 3 | 1 | FS3 reject reason / fault code; 0 otherwise |
-| `seq` | 4 | 4 | PL snapshot `SEQ` this record was decided against |
-| `pl_timestamp` | 8 | 8 | `TIMESTAMP_LO/HI` of the committing packet (3.2.3.1) |
-| `cpu_timestamp` | 16 | 8 | Core-1 PMU cycle count (CCNT) — FS2 instrumentation for free |
-| `best_bid_price`, `best_bid_qty`, `best_ask_price`, `best_ask_qty` | 24 | 16 | Top-of-book at decision time (4 × u32, integer cents / shares) |
-| `order_id` | 40 | 4 | 0 if no order emitted |
-| `order_qty`, `order_price` | 44 | 8 | 2 × u32; 0 if no order |
-| `position_after` | 52 | 4 | Signed shares after this record's effect |
-| `inflight_count` | 56 | 4 | Open-order table occupancy after this record |
-| `realized_pnl` | 60 | 8 | Cumulative, signed integer cents |
-| `reserved` | 68 | 60 | Zero-filled — pads to 128 B and absorbs schema growth without a size change |
-
-### 3.2.3.6 HOLD Mode
-
-HOLD is a state, not a message: per-decision, it just means no doorbell write, and a HOLD record enters the logger. At the session level, HOLD Mode is a latched state entered by (a) the Runtime Trigger from a Risk Guard REJECT pattern — **≥ 3 REJECTs within a rolling 10 s window**, both values from the FS4 config and deliberately conservative — or (b) the EOD path's "REJECT / No Approval" outcome; while latched, the strategy is forced to HOLD until an operator clears it. HOLD needs no PL cooperation — it's simply the absence of a doorbell write.
+Full per-tick logging fails by arithmetic: `1.389 M/s × 128 B ≈ 178 MB/s`, and `10 M ticks × 128 B = 1.28 GB`, exceeding the practical memory budget before OS/code are considered. The selected policy instead logs all decision/outcome/reject/fault records, rate-capped by FS3 at 1,000/s, plus snapshots sampled at 100 Hz and on order events. `[TEAM: confirm/cite 100 Hz snapshot sampling policy]` This is about 128 KB/s + 12.8 KB/s = **141 KB/s**, so the 256 MB ring holds about 30 minutes at the worst-case decision rate while core 0 drains continuously to eMMC. Core 0 also performs end-of-session export over PS GbE, periodic `DIAG_*` sampling, and the FS11 1 Hz Debug-UART console feed without charging core 1.
 
 ---
 
-## 3.2.4 Quantitative Technical Analysis
-
-### 3.2.4.1 FS2 latency budget, interface capacity, and Risk Guard cost (30 μs at 766 MHz)
-
-30 μs ≈ 23,000 CPU cycles at 766 MHz (the Cortex-A9 max frequency on the target board). The budget also funds the PL egress tail (doorbell-to-MAC-TX ≈ ~1 μs by 3.1 arithmetic), leaving ~29 μs for software:
-
-| Stage | Estimate | Basis |
-|---|---|---|
-| Detect new `SEQ` (one GP0 read) | ~0.15–0.3 μs | AXI-Lite read via GP; pending PMU/ILA microbenchmark — the single number this table hangs on |
-| Snapshot read: 4–6 field reads + seqlock re-read | ~1–1.8 μs | 6–8 GP reads; retry probability bounded below |
-| Strategy evaluation | ≤ ~1 μs | Hundreds of integer ops on O(1) state — generous ceiling |
-| Runtime Risk Guard | ≪ 0.1 μs | ~25–30 cycles, detailed below |
-| Logger record write | ≤ ~0.5 μs | Fixed 128 B struct copy into cached ring |
-| Order-field writes + doorbell (5 GP writes) | ~0.5–1 μs | AXI-Lite posted writes |
-| **Software total** | **≤ ~5 μs** | **≥ 5.5× margin against the ~29 μs share; worst case is what FS2's 1,000-tick verification samples** |
-
-Under the rejected interrupt design, the first row alone costs 10–40 μs — 40–160% of budget before any work. The selected design's entire path is bounded by countable bus transactions. These estimates will be replaced with PMU (CCNT) per-stage instrumentation across 1,000 ticks, then the Wireshark end-to-end check.
-
-**Runtime Risk Guard cost bound.** Notional: one `umull` + compare ≈ 5–10 cycles. Position: add + two compares ≈ 5 cycles. Rate: timer-delta × fixed-point constant, multiply-shift-saturate ≈ 10 cycles; spend = decrement + compare ≈ 2 cycles. In-flight: one counter compare ≈ 1–2 cycles. Total ≈ 23–29 cycles ≈ 0.03–0.04 μs at 766 MHz — under 0.1% of the FS2 budget — quantitatively closing 3.2.3.3's "no latency case for hardware risk checks" claim.
-
-**Interface capacity, conflation, and the DMA comparison.** Three rates bound the system (using the GP-read estimate above, worst case 0.3 μs):
-
-```
-Snapshot read cost (6 reads + seqlock): ~1.5–2 μs → PS observation ceiling ≈ 500–670 K snapshots/s
-Full decision iteration (table above): ≤ ~5 μs → PS decision ceiling ≥ ~200 K decisions/s
-Wire tick ceiling (3.1.2, Decision 2): 1.389 M ticks/s
-```
-
-The PS cannot observe every tick (670 K < 1.389 M) — but it cannot *process* every tick either (200 K < 1.389 M): **the bottleneck is the CPU, not the interface.** A DMA ring would not raise either ceiling; it would only queue ticks the CPU cannot consume, forcing the strategy to act on progressively staler books — for trading, a negative. A ring consumer would end by skipping to the newest entry, i.e., re-implementing conflation with more hardware.
-
-**Conflation is a consequence of Decision 1, not an HFT norm.** The published architectures split into camps that don't face this trade-off at all: Kao et al. and Boutros et al. keep the trading logic itself in fabric, so there is no software consumer to outrun the wire and no tick is ever discarded [2], [6]; Toshiba's production system pushes even the optimization layer into a hardware-realized solver for the same reason [8]. Morris et al. instead keep software in the loop but route the full tick stream into a host-memory queue via DMA, and explicitly warn that market bursts can outrun the consuming thread and build an unbounded backlog of increasingly stale data [4] — precisely the failure mode conflation is built to avoid. This project takes neither path wholesale: Decision 1 commits the strategy to PS software for nightly EOD reconfigurability, which rules out the fully-hardware camp, and an unbounded backlog is worse for a top-of-book strategy than a bounded, always-current sample, which rules out queueing the full stream. Conflation is the right call *given* that commitment — not a claim that discarding ticks is standard HFT practice. For a strategy that needs the discarded microstructure (order-flow imbalance, queue position), it would be the wrong one, and Decision 1 would need revisiting first.
-
-Seqlock retry probability: a retry occurs only if a commit lands inside the ~1.5 μs read window; even at full wire rate the expected retries per read ≈ 1.5 μs × 1.389 M/s ≈ 2 — bounded by capping retries at 4 and accepting the newest consistent snapshot; a retry-rate counter will be recorded during full-rate injection.
-
-**Sensitivity boundaries (when this interface stops being right):**
-
-| Condition | Register path | Conclusion |
-|---|---|---|
-| Current spec: 1 symbol, top-of-book, conflation acceptable | ~1.5–2 μs/read, ≥ 5× FS2 margin | **Adequate — selected** |
-| Payload > ~100 B/event (e.g., 10-level depth) | ~40 reads ≈ 10 μs — erodes margin | Migrate to a **GP-mapped dual-port BRAM window** (PL BRAM as AXI slave) — still no DMA IP, no driver |
-| Per-tick consumption required (no conflation) | Observation ceiling < wire rate | DMA ring required — and a faster CPU with it; out of prototype scope |
-
-**TX contention arithmetic:** FS3 caps orders at 1,000/s (≥ 1 ms spacing) vs. ~1 μs per packet transmit — a 1000× margin; `TX_READY` exists as a correctness invariant, not a performance mechanism.
-
-### 3.2.4.2 FS5 memory budget arithmetic
-
-Record size = 128 B (schema frozen in 3.2.3.5):
-
-```
-Full per-tick logging: 1.389 M/s × 128 B ≈ 178 MB/s bandwidth; 10 M ticks × 128 B = 1.28 GB capacity — already over the board's entire 1 GB of DDR3, before even setting aside room for the OS and code
-Available DDR3 (approx): PS DDR3 is 1 GB total (2×512 MB). Assuming ≈ 512 MB remains available after OS + code is a reasonable working budget for FS5 planning.
-Decision-record ceiling: 1,000/s (FS3) × 128 B = 128 KB/s
-Snapshot sampling @100 Hz: 12.8 KB/s
-```
-
-Per-tick logging fails on both capacity and bandwidth, which is why the ring (3.2.3.5) logs decisions/outcomes in full but only samples snapshots. The selected policy's sustained rate (~141 KB/s) is three orders of magnitude below the failure mode; the 256 MB ring holds ≈ 30 minutes at the absolute-worst decision rate while core 0 drains continuously to eMMC, so occupancy stays bounded. The board's 8 GB eMMC capacity is ample for the ring + export; the remaining question is sustained write bandwidth, which must be measured. No allocation after startup — FS5's no-OOM clause holds by construction.
-
----
-
-## 3.2.5 Specification Compliance Summary
+## 3.2.4 Specification Compliance Summary
 
 | Spec | How the final design satisfies it | Evidence status |
 |---|---|---|
-| FS2 | Busy-poll isolated core + register reads; ≤ ~5 μs software path vs. ~29 μs share (3.2.4.1) | Analytical; pending PMU-instrumented 1,000-tick run + Wireshark |
-| FS3 | Unbypassable in-thread Risk Guard; four checks + reason-coded log | Pending four-violation injection test |
-| FS4 | Polling loop structurally unreachable until validated config commits | Pending config-swap restart test |
-| FS5 | Static allocation, decision-complete + sampled-snapshot ring, async flush (3.2.4.2) | Analytical; pending 10 M-tick stress + export check |
-| FS14 | Pre-allocated open-order table sized exactly to the FS3(d) ceiling; Risk Guard rejects at limit; modeled terminal transitions (3.2.3.3.1) | Pending limit-saturation injection test |
-| FS11 | Core-0 UART renderer off the shared ring | Pending live-session check |
-| NFS1 | FS2 path is the PS contribution; margin table 3.2.4.1 | Analytical |
-| NFS4 | Linux + isolated core, no hot-path allocation; HOLD Mode as safe state | Pending 6.5 h soak |
+| FS2 | Busy-poll isolated core + register reads; Decision 3 budgets software at <= ~5 μs vs. ~29 μs share | Analytical; GP0 read latency pending PMU/ILA confirmation, then end-to-end Wireshark check |
+| FS3 | In-thread Risk Guard; four checks; 23-29 cycle bound; reason-coded reject log | Pending four-violation injection |
+| FS4 | Polling loop unreachable until validated config commits | Pending config-swap restart |
+| FS5 | Static 128 B records, 256 MB ring, ~141 KB/s selected logging policy | Analytical; pending 10 M-tick stress/export |
+| FS14 | 100-entry open-order table, reject-at-limit guard, modeled terminal transitions | Pending limit-saturation injection |
+| FS11 | Core-0 UART renderer reads the shared ring off the hot path | Pending live-session check |
+| NFS1 | FS2 software path is the dominant PS contribution; Decision 3 shows margin | Analytical |
+| NFS4 | Linux services on core 0, isolated hot path on core 1, no hot-path allocation, HOLD latch as safe state | Pending 6.5 h soak |
 
 # 3.3 EOD Server Pipeline Subsystem
 
@@ -436,7 +372,7 @@ Per-tick logging fails on both capacity and bandwidth, which is why the ring (3.
 
 ## 3.3.1 Overview and Specification Mapping
 
-The EOD (End-of-Day) Server Pipeline is the adaptation layer of AQTA — the component that makes the system *Adaptive* rather than a fixed-strategy appliance. It runs on a host server, off the intraday critical path, and closes the loop between one trading session and the next: it ingests the session history exported by the PS together with historical daily OHLCV data, classifies the next trading day's market regime (FS6), re-optimizes the parameters of the strategy assigned to that regime by exhaustively backtesting a bounded parameter grid (FS7). The result is assembled into a candidate JSON configuration and presented to a human operator, whose explicit approval is the only path by which it can reach the live system (FS8, transmitted to the PS Config Loader of 3.2.3.4); a REJECT or no-approval outcome instead latches the PS into HOLD Mode until an operator clears it (3.2.3.6).
+The EOD (End-of-Day) Server Pipeline is the adaptation layer of AQTA — the component that makes the system *Adaptive* rather than a fixed-strategy appliance. It runs on a host server, off the intraday critical path, and closes the loop between one trading session and the next: it ingests the session history exported by the PS together with historical daily OHLCV data, classifies the next trading day's market regime (FS6), re-optimizes the parameters of the strategy assigned to that regime by exhaustively backtesting a bounded parameter grid (FS7). The result is assembled into a candidate JSON configuration and presented to a human operator, whose explicit approval is the only path by which it can reach the live system (FS8, transmitted to the PS Config Loader of 3.2.3.4); a REJECT or no-approval outcome instead uses the PS HOLD latch described in 3.2.3.3 until an operator clears it.
 
 The subsystem completes a three-tier latency/flexibility hierarchy established in 3.1 and 3.2: the PL is deterministic at nanosecond scale and fixed for the session; the PS decides in microseconds but is reconfigurable nightly; the EOD server may take minutes but is rewritable — the analytics, the parameter values, and the judgment about what tomorrow's market looks like. Each tier trades orders of magnitude of latency for flexibility, and the register-bank and JSON-config interfaces between tiers confine the slower tier's influence on the faster one to two channels: config load at session start, and the HOLD latch on a no-approval outcome, which only narrows the faster tier's behavior (stop trading) and never widens it. On the EOD tier the binding constraint is not latency — NFS5 grants 30 minutes — but **correctness, reproducibility, and auditability**: FS7 demands bit-identical re-runs, FS8 demands that a human can veto every output. Those two properties, not throughput, drive every design decision below.
 
@@ -452,7 +388,7 @@ This subsystem is directly responsible for the following specifications:
 
 Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from sessions traded against 3.4's replay-based simulator, which carries tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
 
-Figure 3.3 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.6 and 3.3.3.7, not as a generic link.)*
+Figure 3.3 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.3 and 3.3.3.7, not as a generic link.)*
 
 ---
 
@@ -697,14 +633,14 @@ The data exists in exactly the required form: LOBSTER reconstructs order-level b
 | Full matching engine (received orders match against the replayed flow and produce fills) | **Rejected.** A large correct-by-construction artifact whose outputs no Section 2 spec consumes — and it would itself need a test bench. |
 | **Paced replay + validate-and-log (selected)** | **Selected.** The replayed stream is never altered by received orders; every received packet is captured with a timestamp and checked offline against the FS13 layout. |
 
-The published record splits on exactly this line: the one surveyed system with a full matching engine validates it against synthetically generated commands in an RTL testbench [18] — the matching engine substitutes for real data the authors did not have. Systems that *have* real data replay it and do not match against their own orders [3], [14], [8]. AQTA needs no fills from the simulator: fill timing is modeled on the PS side (fill delay **T**, 3.2.3.3.1), order disposition is tracked by the PS open-order table and Risk Guard (3.2.3.3, FS14), and with FS3 capping orders at 1,000 shares against a book quoting thousands per level, market impact would be second-order even if modeled.
+The published record splits on exactly this line: the one surveyed system with a full matching engine validates it against synthetically generated commands in an RTL testbench [18] — the matching engine substitutes for real data the authors did not have. Systems that *have* real data replay it and do not match against their own orders [3], [14], [8]. AQTA needs no fills from the simulator: fill timing is modeled on the PS side (fill delay **T**, 3.2.3.3), order disposition is tracked by the PS open-order table and Risk Guard (3.2.3.3, FS14), and with FS3 capping orders at 1,000 shares against a book quoting thousands per level, market impact would be second-order even if modeled.
 
 Since nothing needs to be decided at runtime, all intelligence moves off the session path: a preprocessor materializes everything expensive once, the live path is a paced `sendto` loop plus a `recvfrom` logger, and parsing and comparison run afterwards against the logs. That a plain Python script suffices is settled by one chain of rates, each comfortably below the next:
 
 ```
 real day, worst burst     ~2,400 msg/s    (measured, Decision 1)
 replay script, max send   ~91,000 msg/s   (measured)
-PS decision ceiling       ~200,000 /s     (analysis, 3.2.4.1)
+PS decision ceiling       ~200,000 /s     (analysis, 3.2 Decision 3)
 PL wire ceiling           ~1.39 M pkt/s   (arithmetic, 3.1.2)
 ```
 
