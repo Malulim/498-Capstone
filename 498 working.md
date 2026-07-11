@@ -210,7 +210,7 @@ Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 
 ### 3.2.1 Overview and Specification Mapping
 
-The PS subsystem is the software half of the intraday trading loop on the selected XC7Z020 Zynq-7000 device, whose family provides a dual-core ARM Cortex-A9 processing system [19]. Core 1 is isolated from the Linux scheduler and owns the hot path: busy-poll the PL snapshot registers, evaluate the active strategy, apply the Runtime Risk Guard, and write approved order fields back through the register bank and doorbell. Core 0 owns latency-tolerant work: configuration loading, log draining/export, Debug-UART reporting, and session supervision.
+The PS subsystem is the software half of the intraday trading loop on the selected XC7Z020 Zynq-7000 device, whose family provides a dual-core ARM Cortex-A9 processing system [18]. Core 1 is isolated from the Linux scheduler and owns the hot path: busy-poll the PL snapshot registers, evaluate the active strategy, apply the Runtime Risk Guard, and write approved order fields back through the register bank and doorbell. Core 0 owns latency-tolerant work: configuration loading, log draining/export, Debug-UART reporting, and session supervision.
 
 The division of labour with the PL follows one rule established in 3.1: the PL owns wire-speed determinism; the PS owns session-to-session changeability. Strategy formulas, parameters, and risk limits are replaced by the EOD pipeline (Section 3.3), so iterating on them must not require FPGA re-synthesis.
 
@@ -297,7 +297,7 @@ The final design follows one tick through the software path: the register bank d
 
 #### 3.2.3.1 The PL/PS register bank and access protocol (interface contract)
 
-The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped through a 32-bit PS-to-PL AXI master port (`M_AXI_GP0` in the Vivado design) on the Zynq interconnect [19]. This table is the interface contract, jointly owned with 3.1:
+The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped through a 32-bit PS-to-PL AXI master port (`M_AXI_GP0` in the Vivado design) on the Zynq interconnect [18]. This table is the interface contract, jointly owned with 3.1:
 
 | Offset | Register | Dir (PS view) | Semantics |
 |---|---|---|---|
@@ -708,23 +708,23 @@ The more important hazards for AQTA are financial, social, and professional. A t
 
 # References
 
-[1] C. Leber, B. Geib and H. Litz, "High Frequency Trading Acceleration Using FPGAs," *2011 21st International Conference on Field Programmable Logic and Applications*, Chania, Greece, 2011, pp. 317-322, doi: 10.1109/FPL.2011.64.
+[1] C. Leber, B. Geib and H. Litz, "High Frequency Trading Acceleration Using FPGAs," 2011 21st International Conference on Field Programmable Logic and Applications, Chania, Greece, 2011, pp. 317-322, doi: 10.1109/FPL.2011.64.
 
-[2] Y.-C. Kao, H.-A. Chen and H.-P. Ma, "An FPGA-Based High-Frequency Trading System for 10 Gigabit Ethernet with a Latency of 433 ns," *2022 International Symposium on VLSI Design, Automation and Test (VLSI-DAT)*, Hsinchu, Taiwan, 2022, pp. 1-4, doi: 10.1109/VLSI-DAT54769.2022.9768065.
+[2] Y.-C. Kao, H.-A. Chen and H.-P. Ma, "An FPGA-Based High-Frequency Trading System for 10 Gigabit Ethernet with a Latency of 433 ns," 2022 International Symposium on VLSI Design, Automation and Test (VLSI-DAT), Hsinchu, Taiwan, 2022, pp. 1-4, doi: 10.1109/VLSI-DAT54769.2022.9768065.
 
-[3] C. He, H. Fu, W. Luk, W. Li and G. Yang, "Exploring the potential of reconfigurable platforms for order book update," *2017 27th International Conference on Field Programmable Logic and Applications (FPL)*, Ghent, Belgium, 2017, pp. 1-8, doi: 10.23919/FPL.2017.8056862.
+[3] C. He, H. Fu, W. Luk, W. Li and G. Yang, "Exploring the potential of reconfigurable platforms for order book update," 2017 27th International Conference on Field Programmable Logic and Applications (FPL), Ghent, Belgium, 2017, pp. 1-8, doi: 10.23919/FPL.2017.8056862.
 
-[4] G. W. Morris, D. B. Thomas and W. Luk, "FPGA Accelerated Low-Latency Market Data Feed Processing," *2009 17th IEEE Symposium on High Performance Interconnects*, New York, NY, USA, 2009, pp. 83-89, doi: 10.1109/HOTI.2009.17.
+[4] G. W. Morris, D. B. Thomas and W. Luk, "FPGA Accelerated Low-Latency Market Data Feed Processing," 2009 17th IEEE Symposium on High Performance Interconnects, New York, NY, USA, 2009, pp. 83-89, doi: 10.1109/HOTI.2009.17.
 
-[5] M. Mohamed Asan Basiri, "Hardware based Order Book Design in High Frequency Algo Trading," *2021 IEEE International Symposium on Smart Electronic Systems (iSES)*, Jaipur, India, 2021, pp. 285-288, doi: 10.1109/iSES52644.2021.00073.
+[5] M. Mohamed Asan Basiri, "Hardware based Order Book Design in High Frequency Algo Trading," 2021 IEEE International Symposium on Smart Electronic Systems (iSES), Jaipur, India, 2021, pp. 285-288, doi: 10.1109/iSES52644.2021.00073.
 
-[6] A. Boutros, B. Grady, M. Abbas and P. Chow, "Build fast, trade fast: FPGA-based high-frequency trading using high-level synthesis," *2017 International Conference on ReConFigurable Computing and FPGAs (ReConFig)*, Cancun, Mexico, 2017, pp. 1-6, doi: 10.1109/RECONFIG.2017.8279781.
+[6] A. Boutros, B. Grady, M. Abbas and P. Chow, "Build fast, trade fast: FPGA-based high-frequency trading using high-level synthesis," 2017 International Conference on ReConFigurable Computing and FPGAs (ReConFig), Cancun, Mexico, 2017, pp. 1-6, doi: 10.1109/RECONFIG.2017.8279781.
 
 [7] R. Osuna, B. Reponte, and L. G. Ramirez, "Low-latency Ethernet communications on FPGA SoC for high frequency trading," Kastner Research Group, University of California, San Diego, San Diego, CA, USA, Tech. Rep., Jun. 2025. [Online]. Available: https://kastner.ucsd.edu/wp-content/uploads/2025/06/admin/highfrequencytrading.pdf
 
-[8] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Real-time Trading System Based on Selections of Potentially Profitable, Uncorrelated, and Balanced Stocks by NP-Hard Combinatorial Optimization," *IEEE Access*, vol. 11, pp. 120023–120036, 2023, doi: 10.1109/ACCESS.2023.3326816.
+[8] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Real-time Trading System based on Selections of Potentially Profitable, Uncorrelated, and Balanced Stocks by NP-hard Combinatorial Optimization," Corporate Research and Development Center, Toshiba Corporation, Japan, 2023.
 
-[9] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Pairs-Trading System Using Quantum-Inspired Combinatorial Optimization Accelerator for Optimal Path Search in Market Graphs," *IEEE Access*, vol. 11, pp. 104406–104416, 2023, doi: 10.1109/ACCESS.2023.3316727.
+[9] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Pairs-trading System using Quantum-inspired Combinatorial Optimization Accelerator for Optimal Path Search in Market Graphs," Corporate Research and Development Center, Toshiba Corporation, Japan, 2023.
 
 [10] Interactive Brokers, "Market Depth (Level II)," TWS API v9.72+ Documentation. [Online]. Available: https://interactivebrokers.github.io/tws-api/market_depth.html [Accessed: Jul. 9, 2026].
 
@@ -736,20 +736,18 @@ The more important hazards for AQTA are financial, social, and professional. A t
 
 [14] Y. Zheng, "FPGA-based Acceleration for High Frequency Trading," M.Phil. thesis, Dept. Electron. Comput. Eng., Hong Kong Univ. Sci. Technol., Hong Kong, Jan. 2023.
 
-[15] J. D. Hamilton, "A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle," *Econometrica*, vol. 57, no. 2, pp. 357–384, Mar. 1989, doi: 10.2307/1912559.
+[15] J. D. Hamilton, "A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle," Econometrica, vol. 57, no. 2, pp. 357–384, Mar. 1989, doi: 10.2307/1912559.
 
-[16] Xilinx, "Tri-Mode Ethernet MAC v9.0 LogiCORE IP Product Guide," PG051, Advanced Micro Devices, Inc. [Online]. Available: https://docs.amd.com/r/en-US/pg051-tri-mode-eth-mac [Accessed: Jul. 10, 2026].
+[16] Xilinx, "Tri-Mode Ethernet MAC v9.0 LogiCORE IP Product Guide," PG051. [Online]. Available: https://docs.amd.com/r/en-US/pg051-tri-mode-eth-mac [Accessed: Jul. 10, 2026].
 
-[17] 正点原子 (ALIENTEK), "领航者 ZYNQ 之嵌入式开发指南 / Navigator ZYNQ-7020 Development Board User Manual (XC7Z020CLG400-2I)," Guangzhou Xingyi Electronic Technology Co., Ltd. [Online]. Available: http://www.openedv.com/docs/boards/fpga/zdyz_linhanzhe.html [Accessed: Jul. 10, 2026].
+[17] 正点原子 (ALIENTEK), "领航者 ZYNQ 之嵌入式开发指南 / Navigator ZYNQ-7020 Development Board User Manual." [Online]. Available: http://www.openedv.com/docs/boards/fpga/zdyz_linhanzhe.html [Accessed: Jul. 10, 2026].
 
-[18] S. Puranik, M. Barve, S. Rodi, and R. Patrikar, "Acceleration of Trading System Back End with FPGAs Using High-Level Synthesis Flow," *Electronics*, vol. 12, no. 3, art. 520, Jan. 2023, doi: 10.3390/electronics12030520.
+[18] Xilinx, "Zynq-7000 SoC Data Sheet: Overview," DS190. [Online]. Available: https://docs.amd.com/v/u/en-US/ds190-Zynq-7000-Overview [Accessed: Jul. 11, 2026].
 
-[19] Xilinx, "Zynq-7000 SoC Data Sheet: Overview," DS190, v1.11.1, Advanced Micro Devices, Inc., Jul. 2018. [Online]. Available: https://docs.amd.com/v/u/en-US/ds190-Zynq-7000-Overview [Accessed: Jul. 11, 2026].
+### Further reading
 
-### Further reading (uncited in this document)
-
-- D. H. Bailey, J. M. Borwein, M. López de Prado, and Q. J. Zhu, "The Probability of Backtest Overfitting," *Journal of Computational Finance*, vol. 20, no. 4, pp. 39–69, 2017, doi: 10.21314/JCF.2016.322.
+- D. H. Bailey et al., "The Probability of Backtest Overfitting," *J. Computational Finance*, vol. 20, no. 4, pp. 39–69, 2017, doi: 10.21314/JCF.2016.322.
 - FIX Trading Community, "FIX Adapted for STreaming (FAST) Specification." [Online]. Available: https://www.fixtrading.org/standards/fast-online/ [Accessed: Jul. 9, 2026].
-- J. Zang, "quant-engine: a C++ quantitative backtest and research engine," independent project documentation. [Online]. Available: https://qe.jiucheng-zang.ca [Accessed: Jul. 2026].
+- J. Zang, "quant-engine: a C++ quantitative backtest and research engine." [Online]. Available: https://qe.jiucheng-zang.ca [Accessed: Jul. 11, 2026].
 
 `[TEAM: bibliography housekeeping — (i) confirm the citation style guide for online resources; (ii) Hamilton 1989 is now in the list as [15]; Bailey et al. 2017 (backtest overfitting) moved to Further Reading since the grid-vs-Bayesian comparison it supported was cut; FinBERT/Araci and Loughran-McDonald were removed with the FS9/FS10 text-sentiment path (Section 2 footnote); Toshiba entries [8]/[9] venues confirmed (IEEE Access vol. 11, 2023, DOIs in place). TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
