@@ -593,9 +593,8 @@ Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from
 
 ## 3.4.1 Overview and Specification Mapping
 
-The Exchange Simulator plays the exchange that the project deliberately does not connect to (Section 1.2's paper-trading boundary). It runs on the host PC at the far end of the point-to-point Gigabit Ethernet link: it replays a real order-level trading day into the PL in the custom protocol of Table 3.1.3, and captures every order packet the SoC emits (Table 3.1.4) for offline validation.
-
-Published FPGA trading systems validate at three access tiers: live capital in exchange co-location [8], [9]; a broker's test server [2]; or a laboratory setup where a host script injects packets and captures what comes back [6], [7]. AQTA sits at the laboratory tier — co-location and broker-member access are out of scope for a capstone — so this subsystem must supply by itself what the upper tiers get from their environment: the market data, the counterparty, and the measurement fixture. The tier also fixes the right engineering form, which is deliberately small: **one real dataset, three short host scripts, and Wireshark, with every correctness judgment made offline rather than in a runtime component.** The simulator is thus both the exchange and the project's principal verification instrument: FS1's reference packet sequence, FS2's measurement input, FS13's captured packets, NFS2's frame counts, and NFS4's 6.5-hour session all come from here.
+The Exchange Simulator plays the exchange that the project deliberately does not connect to (Section 1.2's paper-trading boundary). It runs on the host PC at the far end of the point-to-point Gigabit Ethernet link: it replays a real order-level trading day into the PL in the custom protocol of Table 3.1.3, and captures every order packet the SoC emits (Table 3.1.4) for offline validation. 
+While published FPGA systems validate across three access tiers—exchange co-location [8], [9], broker test servers [2], or laboratory injection setups [6], [7]—AQTA structurally targets the laboratory tier to respect the capstone's paper-trading boundary. Consequently, this subsystem must self-supply the market data, counterparty, and measurement fixtures provided by higher-tier environments. The resulting architecture is deliberately lean: one real dataset, three short host scripts, and Wireshark, with all correctness judgments executed offline. This makes the simulator the project's principal verification instrument, sourcing inputs for FS1, FS2, FS13, NFS2, and NFS4. 
 
 | Spec | Simulator role |
 |---|---|
@@ -622,7 +621,7 @@ Two decisions define this subsystem; both were settled by external constraints a
 | Synthetic order-flow generator | **Rejected.** Meets the protocol formats, but its realism (rates, event mix, burst structure) would itself need modeling and defense — effort no specification consumes. |
 | **Replay of a real captured L3 day (selected)** | **Selected.** Realism is free (the stream *is* a real NASDAQ day), reproducibility is structural (a fixed file), and one full 6.5 h session is exactly what NFS4 needs. |
 
-The data exists in exactly the required form: LOBSTER reconstructs order-level book data from NASDAQ TotalView-ITCH [11]; full access is a paid subscription [12], but the official free samples [13] include one complete trading day (AAPL, 2012-06-21) as a `message` file (the L3 event stream) plus an `orderbook` file (the book state after every message). The AAPL day at 10 book levels matches the PL book depth (Table 3.1.5), and published FPGA order-book work has validated against this same sample day [14]. The orderbook file is a ready-made per-message ground truth — it lets the PL book be verified without the simulator ever maintaining a book of its own (3.4.3.1). The dataset and the protocol were exercised together at design time by pushing the full day (400,391 messages) through a prototype of the translation layer: that run measured the day's rates (~17 msg/s average, ~2,400 msg/s worst 100 ms burst — the figures used throughout this section) and caught two protocol ambiguities early enough to fix the document rather than debug hardware — sub-penny prices (resolved by the integer-cent rounding of 3.1.3.2) and whether a Modify's `qty` is absolute or a delta (resolved in Table 3.1.3: absolute remaining quantity).
+The academic LOBSTER dataset [11] provides the exact L3 order-level NASDAQ data required. The AAPL day at 10 book levels matches the PL book depth (Table 3.1.5), and published FPGA order-book work has validated against this same sample day [14]. Using the official AAPL sample day [13] offers a free, deterministic, and highly realistic testing ground. Pushing the full day (400,391 messages) through a design-time prototype successfully validated the translation layer, measured real market rates (~17 msg/s average, ~2,400 msg/s peak burst), and resolved two protocol ambiguities early (sub-penny rounding and Modify-semantics) prior to hardware synthesis. 
 
 ### Decision 2 — Execution model: validate-and-log, all judgment offline
 
@@ -631,17 +630,14 @@ The data exists in exactly the required form: LOBSTER reconstructs order-level b
 | Full matching engine (received orders match against the replayed flow and produce fills) | **Rejected.** A large correct-by-construction artifact whose outputs no Section 2 spec consumes — and it would itself need a test bench. |
 | **Paced replay + validate-and-log (selected)** | **Selected.** The replayed stream is never altered by received orders; every received packet is captured with a timestamp and checked offline against the FS13 layout. |
 
-The published record splits on exactly this line: the one surveyed system with a full matching engine validates it against synthetically generated commands in an RTL testbench [18] — the matching engine substitutes for real data the authors did not have. Systems that *have* real data replay it and do not match against their own orders [3], [14], [8]. AQTA needs no fills from the simulator: fill timing is modeled on the PS side (fill delay **T**, 3.2.3.3), order disposition is tracked by the PS open-order table and Risk Guard (3.2.3.3, FS14), and with FS3 capping orders at 1,000 shares against a book quoting thousands per level, market impact would be second-order even if modeled.
-
-Since nothing needs to be decided at runtime, all intelligence moves off the session path: a preprocessor materializes everything expensive once, the live path is a paced `sendto` loop plus a `recvfrom` logger, and parsing and comparison run afterwards against the logs. That a plain Python script suffices is settled by one chain of rates, each comfortably below the next:
-
+A full matching engine is redundant because fill timing (delay T) and order disposition are already modeled on the PS side by the Risk Guard and open-order table (3.2.3.3, FS14). Furthermore, with FS3 capping orders at 1,000 shares against a highly liquid book, market impact is negligible. Therefore, the replayed stream remains unaltered, and received orders are strictly captured for offline validation. 
+Because all intelligence is pushed to the preprocessor and offline checkers, the live path is reduced to a paced sendto loop and a recvfrom logger. Rate arithmetic confirms a Python script easily suffices:
 ```
 real day, worst burst     ~2,400 msg/s    (measured, Decision 1)
 replay script, max send   ~91,000 msg/s   (measured)
 PS decision ceiling       ~200,000 /s     (analysis, 3.2 Decision 3)
 PL wire ceiling           ~1.39 M pkt/s   (arithmetic, 3.1.2)
 ```
-
 The sender is the bottleneck, and that is the right place for it: the script clears the worst real burst with a ~38× margin, no rate this subsystem can produce stresses the PL, and the PS can keep up with every tick at any replay speed.
 
 ---
@@ -650,30 +646,21 @@ The sender is the bottleneck, and that is the right place for it: the script cle
 
 ### 3.4.3.1 Components and artifacts
 
-**Dataset Preprocessor (offline, once per slice).** Reads the LOBSTER message and orderbook files and slice bounds. Its translation layer tracks the order pool, rewrites Modify events to the order's new absolute remaining quantity (Table 3.1.3's `qty` semantics), rounds sub-penny prices to integer cents (per 3.1.3.2), and prepends a priming prefix of Add events reconstructing the book at slice start, so that the ~2% of messages referencing pre-session orders resolve. It runs at ~1 M msg/s — the full day translates in under a second. Two artifacts:
+**Dataset Preprocessor (offline, once per slice).** Translates LOBSTER records into protocol-compliant bytes at ~1 M msg/s. It applies the agreed semantics (integer-cent rounding, absolute remaining quantity), primes the initial book state, and enforces structural invariants (e.g., preventing negative quantities). It yields two deterministic artifacts:
 
 1. **Frame file** — the slice pre-encoded into Table 3.1.3 payloads, each frame keeping its original NASDAQ timestamp for pacing.
 2. **Expected-book file** — per-message top-of-book, derived from LOBSTER's own orderbook file with the same cent rounding applied. Exported PS snapshots carry the PL `SEQ` they were decided against (3.2.3.5), which maps one-to-one onto frame index, so each snapshot is diffed against its expected-book row directly.
 
-The preprocessor asserts three sanity checks on every run — every Modify/Delete references a known order, no book quantity goes negative, and every encoded frame decodes back to its source event — and all three passed with zero violations across the full real day. Its output is also deterministic: two passes over the same file and parameters produce byte-identical streams, which is what makes FS7's bootstrap corpus reproducible end-to-end.
+The preprocessor asserts three sanity checks on every run — every Modify/Delete references a known order, no book quantity goes negative, and every encoded frame decodes back to its source event — and all three passed with zero violations across the full real day. Its output is also deterministic: two passes over the same file and parameters produce byte-identical streams, which is what makes FS7's bootstrap corpus reproducible end-to-end. 
 
-**Replayer (online).** Reads the frame file and transmits each frame at `session_start + (t_msg − t_open)/rate_scale` (priming prefix sent back-to-back first), logging frame index + TX timestamp per frame. A timed `sendto` of pre-encoded bytes.
+**Replayer & Order Receiver (online).** The Replayer is a paced sendto loop that streams the frame file and logs TX timestamps. Symmetrically, the Order Receiver blindly captures incoming raw packets and RX timestamps to an offline log. Neither component parses or processes data at runtime.
 
-**Order Receiver (online).** Appends every received packet — raw bytes + RX timestamp — to the order log. Never parses, never replies.
+**FS13 Offline Checker (post-session).** Parses the receiver's log against Table 3.1.4, functioning as the spec-validation oracle and isolating parsing overhead from session execution. A full session's logs total tens of MB and average wire utilization is around 0.001% of the GbE link — data volume is a non-issue, so the NFS4 soak run keeps full logging on throughout.
 
-**FS13 Offline Checker (post-session).** Parses every logged order packet against Table 3.1.4 and range-checks each field. As an independent second implementation of the protocol spec, any disagreement with the PL encoder indicts the *document* — the mechanism that already caught the Modify-semantics ambiguity during Decision 1's prototype run, before any hardware existed.
+### 3.4.3.2 Pacing and Link Configuration
 
-A full session's logs total tens of MB and average wire utilization is around 0.001% of the GbE link — data volume is a non-issue, so the NFS4 soak run keeps full logging on throughout.
-
-### 3.4.3.2 Replay pacing
-
-`rate_scale` is a command-line parameter: 1 reproduces the real day's timing; larger values compress it. Host timer resolution (~1 ms) is far below the day's mean message gap (~60 ms), so pacing is faithful at session scale. The ~38× send margin doubles as the **maximum faithful compression factor**: up to about `rate_scale = 38`, even the densest real burst stays within send capability and every frame lands on its scaled timestamp.
-
-Usage rule: development and demo runs compress (`rate_scale = 20` replays the whole day in under 20 minutes with its burst structure intact) or replay a dense slice at real speed; verification runs anchored to wall-clock time — NFS4's soak, FS2's 1000-update measurement, NFS2's 10-minute window — use `rate_scale = 1`, because the PS's rate limit, fill delay **T**, and snapshot sampling are wall-clock-based.
-
-### 3.4.3.3 Link and host configuration
-
-Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained drops" argument depends on this), static IP/MAC matching the PL's compile-time constants (3.1.3.1), UDP checksum emitted as zero (the PL ignores the field; integrity is covered by the Ethernet FCS). The simulator may share a physical machine with the EOD server but runs as an independent process. Wireshark on this NIC is the primary instrument for FS2/NFS1/NFS2; the TX and RX logs share the host clock and serve as a second witness.
+The rate_scale parameter controls pacing. A rate_scale of 1 faithfully reproduces real-world microsecond timing for formal verification (e.g., NFS4 soak, FS2 measurement). For rapid development, the ~38× send margin permits lossless session compression (e.g., rate_scale = 20 replays the 6.5-hour day in <20 minutes with its burst structure intact). 
+Physically, the host NIC is directly cabled to the PL (no switch) using static IP/MAC configurations to eliminate external networking variables. The simulator runs as an independent host process, relying on Wireshark and host-clocked TX/RX logs as the primary measurement instruments for drop-free assertions (NFS2). 
 
 ---
 
