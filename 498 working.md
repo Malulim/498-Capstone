@@ -225,7 +225,7 @@ The division of labour with the PL follows one rule established in 3.1: the PL o
 | **NFS1** | Owns the dominant software segment of the ≤ 50 μs typical budget. |
 | **NFS4** | Primary owner: 6.5-hour session with no crash/hang/unrecovered error. |
 
-Figure 3.3 shows the PS runtime structure. *(Figure placeholder — must reuse the block-diagram labels above; the register bank appears once, on the PL/PS boundary, with the Feature Parameters and Trade Decision arrows passing through it.)*
+Figure 3.2 shows the PS runtime structure. *(Figure placeholder — must reuse the block-diagram labels above; the register bank appears once, on the PL/PS boundary, with the Feature Parameters and Trade Decision arrows passing through it.)*
 
 ---
 
@@ -452,7 +452,7 @@ This subsystem is directly responsible for the following specifications:
 
 Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from sessions traded against 3.4's replay-based simulator, which carries tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
 
-Figure 3.4 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.6 and 3.3.3.7, not as a generic link.)*
+Figure 3.3 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.6 and 3.3.3.7, not as a generic link.)*
 
 ---
 
@@ -516,7 +516,7 @@ The table bounds the design's validity region explicitly: exhaustive grid + vect
 
 ## 3.3.3 Final Design Details
 
-The pipeline is a sequential staged program; Figure 3.5 shows the stage graph with FS12 log points at every transition. *(Figure placeholder — stage flowchart: [Data Import & Validation] → [Parameter Engineering] → [Regime Detection] → [Strategy Reoptimize / Backtest & Parameter Sweep] → [Risk Analysis] → [Generate JSON Config] → [Operator Approval] → [Transmit / or REJECT→HOLD].)*
+The pipeline is a sequential staged program; Figure 3.4 shows the stage graph with FS12 log points at every transition. *(Figure placeholder — stage flowchart: [Data Import & Validation] → [Parameter Engineering] → [Regime Detection] → [Strategy Reoptimize / Backtest & Parameter Sweep] → [Risk Analysis] → [Generate JSON Config] → [Operator Approval] → [Transmit / or REJECT→HOLD].)*
 
 ### 3.3.3.1 Data import and Parameter Engineering
 
@@ -672,7 +672,7 @@ Published FPGA trading systems validate at three access tiers: live capital in e
 | **FS6/FS7 (bootstrap)** | Data source: the recorded replay session is the FS7 backtest bootstrap corpus (3.3.3.3); the regime path uses Yahoo daily OHLCV (3.3.1) instead. |
 | **NFS3** | Pure host software — subsystem hardware cost is $0 (the host PC is excluded from the cap). |
 
-Figure 3.6 shows the structure. *(Figure placeholder — two lanes: offline — LOBSTER files → Dataset Preprocessor → frame file + expected-book file; online — Replayer → UDP TX → PL; PL → UDP RX → Order Receiver → order log; post-session — FS13 Offline Checker, book diff against the expected-book file; Wireshark on the NIC.)*
+Figure 3.5 shows the structure. *(Figure placeholder — two lanes: offline — LOBSTER files → Dataset Preprocessor → frame file + expected-book file; online — Replayer → UDP TX → PL; PL → UDP RX → Order Receiver → order log; post-session — FS13 Offline Checker, book diff against the expected-book file; Wireshark on the NIC.)*
 
 ---
 
