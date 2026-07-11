@@ -48,7 +48,7 @@ The secondary objective is an End-of-Day (EOD) optimization pipeline that classi
 | **NFS5** | EOD pipeline runtime | Full EOD pipeline (ingestion → classification → optimization → approval prompt) completes within 30 minutes. | Timed run on 1 year of reference OHLCV data. | **N** |
 | **NFS6** | FPGA resource utilization | < 75% LUTs and < 85% Block RAMs on XC7Z020, timing closure at 125 MHz. | Vivado utilization/timing reports, WNS > 0 ns. | **Y** |
 
-*(NFS8 and NFS9 — fault-recovery and line-rate ingest-throughput acceptance specs — were dropped from scope: their verification procedures (scripted fault injection, line-rate PCAP stress) require a test-injection apparatus whose build-and-verify cost is disproportionate to the project's core objective, and the exchange simulator that would have supplied it is deliberately a replay-based instrument (3.4.2 Decision 1). The underlying engineering survives as design features without acceptance criteria: the PL fault-handling path and line-rate throughput analysis (3.1.3.1, 3.1.4.1), PS-side config validation (3.2.3.4), and EOD input validation (3.3.3.6). IDs are left unrenumbered, as with FS9/FS10.)*
+*(NFS8 and NFS9 — fault-recovery and line-rate ingest-throughput acceptance specs — were dropped from scope: their verification procedures (scripted fault injection, line-rate PCAP stress) require a test-injection apparatus whose build-and-verify cost is disproportionate to the project's core objective, and the exchange simulator that would have supplied it is deliberately a replay-based instrument (3.4.2 Decision 1). The underlying engineering survives as design features without acceptance criteria: the PL fault-handling path and line-rate throughput analysis (3.1.3.1, 3.1.2 Decision 2), PS-side config validation (3.2.3.4), and EOD input validation (3.3.3.6). IDs are left unrenumbered, as with FS9/FS10.)*
 
 
 # 3. Detailed Design
@@ -285,11 +285,11 @@ The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped throu
 | 0x04–0x10 | `BEST_BID_PRICE`, `BEST_BID_QTY`, `BEST_ASK_PRICE`, `BEST_ASK_QTY` | R | Feature Parameters (top-of-book snapshot); extend if the Market Feature Builder emits more fields |
 | 0x14–0x18 | `TIMESTAMP_LO/HI` | R | PL hardware timestamp of the committing packet |
 | 0x20–0x2C | `DIAG_PARSE_ERR`, `DIAG_FCS_FAIL`, `DIAG_DROP_OOW`, `DIAG_TX_BACKPRESSURE` | R | Diagnostic counters (NFS2), read periodically by core 0 |
-| 0x40–0x4C | `ORD_SYMBOL_SIDE`, `ORD_QTY`, `ORD_PRICE`, `ORD_ID` | W | Order fields (FS13 source values) — the block diagram's "Trade Decision" arrow. `ORD_SYMBOL_SIDE` packs `symbol` in bits [15:0] and `side` in bits [23:16] (bits [31:24] reserved = 0), matching their widths in Table 3.1.5. |
+| 0x40–0x4C | `ORD_SYMBOL_SIDE`, `ORD_QTY`, `ORD_PRICE`, `ORD_ID` | W | Order fields (FS13 source values) — the block diagram's "Trade Decision" arrow. `ORD_SYMBOL_SIDE` packs `symbol` in bits [15:0] and `side` in bits [23:16] (bits [31:24] reserved = 0), matching their widths in Table 3.1.4. |
 | 0x50 | `DOORBELL` | W | Write-1 launches the Order Emitter; **payload first, doorbell last** |
 | 0x54 | `TX_READY` | R | Egress flow-control invariant (see 3.2.4.1) |
 
-**Consistency and conflation.** PL commits are single-clock-edge atomic, so tearing can only happen on the PS side, where reading 4–6 registers spans ~1 μs across several AXI transactions; core 1 guards against it with a seqlock (read `SEQ`, read fields, re-read `SEQ`, retry on mismatch). Egress needs no lock — the PL samples order fields only on the doorbell strobe. The bank also holds only the latest snapshot: if ticks outrun the polling loop, intermediate snapshots are overwritten rather than queued, so the strategy always decides on the current book. This doesn't affect PL-side ingest — the PL still books every packet at line rate (3.1.4.1); conflation applies only to what the PS samples, and it is a consequence of keeping the strategy in PS software (Decision 1), not a general HFT norm — see the trade-off discussion in 3.2.4.1.
+**Consistency and conflation.** PL commits are single-clock-edge atomic, so tearing can only happen on the PS side, where reading 4–6 registers spans ~1 μs across several AXI transactions; core 1 guards against it with a seqlock (read `SEQ`, read fields, re-read `SEQ`, retry on mismatch). Egress needs no lock — the PL samples order fields only on the doorbell strobe. The bank also holds only the latest snapshot: if ticks outrun the polling loop, intermediate snapshots are overwritten rather than queued, so the strategy always decides on the current book. This doesn't affect PL-side ingest — the PL still books every packet at line rate (3.1.2, Decision 2); conflation applies only to what the PS samples, and it is a consequence of keeping the strategy in PS software (Decision 1), not a general HFT norm — see the trade-off discussion in 3.2.4.1.
 
 ### 3.2.3.2 Strategy Engine (Plug-In Execution)
 
@@ -380,7 +380,7 @@ Under the rejected interrupt design, the first row alone costs 10–40 μs — 4
 ```
 Snapshot read cost (6 reads + seqlock): ~1.5–2 μs → PS observation ceiling ≈ 500–670 K snapshots/s
 Full decision iteration (table above): ≤ ~5 μs → PS decision ceiling ≥ ~200 K decisions/s
-Wire tick ceiling (3.1.4.1): 1.389 M ticks/s
+Wire tick ceiling (3.1.2, Decision 2): 1.389 M ticks/s
 ```
 
 The PS cannot observe every tick (670 K < 1.389 M) — but it cannot *process* every tick either (200 K < 1.389 M): **the bottleneck is the CPU, not the interface.** A DMA ring would not raise either ceiling; it would only queue ticks the CPU cannot consume, forcing the strategy to act on progressively staler books — for trading, a negative. A ring consumer would end by skipping to the newest entry, i.e., re-implementing conflation with more hardware.
@@ -586,7 +586,7 @@ Verified by running the pipeline twice on the same input and byte-comparing the 
 
 #### 3.3.3.3.1 Preliminary validation run (real data)
 
-The procedures above were run end-to-end against real AAPL daily OHLCV (1984-09-07 to 2008-10-14, BSD-licensed public archive, fetched via raw.githubusercontent.com) as a preliminary check ahead of full implementation. This is a stand-in for the production source (Yahoo Finance, per 3.3.1) rather than a pull from Yahoo Finance itself; both are free daily-OHLCV sources with no license required, so the substitution does not change the data-access argument. This window predates and is unrelated to the LOBSTER anchor day (3.4.4.6); the two real-data checks in this report are independent by design — this one exercises the regime/sweep procedure on a full percentile-scheme-sized history, the other (3.4.4.6) exercises the tick-level protocol translation — and are not required to share a period.
+The procedures above were run end-to-end against real AAPL daily OHLCV (1984-09-07 to 2008-10-14, BSD-licensed public archive, fetched via raw.githubusercontent.com) as a preliminary check ahead of full implementation. This is a stand-in for the production source (Yahoo Finance, per 3.3.1) rather than a pull from Yahoo Finance itself; both are free daily-OHLCV sources with no license required, so the substitution does not change the data-access argument. This window predates and is unrelated to the LOBSTER anchor day (3.4.2 Decision 1); the two real-data checks in this report are independent by design — this one exercises the regime/sweep procedure on a full percentile-scheme-sized history, the other (3.4.2 Decision 1) exercises the tick-level protocol translation — and are not required to share a period.
 
 Calibrating on 2007-04-18 to 2008-04-16 (252 trading days, `θ_vol = 0.518`, `θ_trend = 0.059`) and classifying the next 126 days — which fall in the Sept–Oct 2008 crash:
 
@@ -653,166 +653,107 @@ Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from
 
 # 3.4 Exchange Simulator Subsystem
 
-> The block diagram labels this subsystem *"Exchange Simulator on Host (Live Order Book & Executor — 1 Exch / 1 Stock)"*; internal component names below are *LOBSTER Replay Driver, Book Mirror, Protocol Encoder, Order Executor (validate-and-log), Ground-Truth Logger*.
-> **Spec baseline:** Section 2's FS14 (single-symbol), FS3 (four-limit), and FS2 (99th-percentile) already reflect the design below; fill semantics use option C2 (PS-side simulated fill latency), with C1 execution reports documented as a future extension.
-> All measured figures in this section were produced on the development sandbox against the real LOBSTER AAPL sample dataset (3.4.4.5); pending a re-run on the target host before final submission.
+> Internal component names: *Dataset Preprocessor (offline), Replayer, Order Receiver, FS13 Offline Checker*. Measured figures in this section come from design-time prototype runs on the development sandbox; a re-run on the target host is pending.
 
 ---
 
 ## 3.4.1 Overview and Specification Mapping
 
-The Exchange Simulator is the counterparty to everything built in 3.1–3.3: it plays the exchange that the project objective requires but deliberately does not connect to (Section 1.2's paper-trading boundary). It runs on the host PC, terminates the far end of the point-to-point Gigabit Ethernet link into the PL (both the outbound market-data feed and the inbound order-receive path), produces the market-data event stream by replaying a real order-level trading day in the custom protocol of Table 3.1.4, maintains its own mirror of the resulting order book, and receives, validates, and logs every order packet the SoC emits (Table 3.1.5).
+The Exchange Simulator plays the exchange that the project deliberately does not connect to (Section 1.2's paper-trading boundary). It runs on the host PC at the far end of the point-to-point Gigabit Ethernet link: it replays a real order-level trading day into the PL in the custom protocol of Table 3.1.3, and captures every order packet the SoC emits (Table 3.1.4) for offline validation.
 
-**Positioning within the field.** Published end-to-end FPGA trading systems fall into a clear feasibility hierarchy defined by exchange access. At the top, Toshiba's two production systems ran live capital in the Tokyo Stock Exchange's JPX co-location facility [8], [9]; below them, Kao et al. connected to a real futures-broker test server for the Taiwan Futures Exchange, exercising genuine protocol handshakes without live capital [2]; at the laboratory tier, Boutros et al. validated their HLS pipeline by injecting UDP packets and capturing returned order packets in loopback [6], and Osuna et al.'s PYNQ-Z2 educational system replays market data from a host Python script [7]. AQTA belongs, by construction, to this laboratory tier: the co-location and broker-member access that define the upper tiers is unavailable to (and out of scope for) a capstone project. The design consequence is that this subsystem must supply, *by itself*, everything the upper tiers get from their environment — the market data, the counterparty, and the measurement fixture — which is why it is engineered as a first-class subsystem rather than a test script.
-
-**Dual identity.** Functionally, the simulator is the *exchange*: without it, no market data exists and the system under design has nothing to trade against. Its more demanding identity, however, is as the project's principal *verification instrument*: nearly every remaining verification procedure in Section 2 — FS1's reference packet sequence, FS2's 1000-update measurement, FS13's captured-packet parse, NFS2's 10-minute frame count, NFS4's 6.5-hour session — names an input that only this subsystem can supply. A simulator that merely "produces plausible ticks" would satisfy the first identity and fail the second; the design therefore treats **reproducibility and ground-truth observability** as first-class requirements — and then gets market realism for free, because the stream it emits is a real trading day (Decision 1).
-
-**Scope statement.** Two instrument roles carried by earlier drafts — scripted fault injection and line-rate stress generation — were dropped together with the NFS8/NFS9 acceptance specs they served (Section 2 note), and with them the synthetic order-flow generator and scenario engine that existed to provide them. What remains is deliberately minimal: a replay data path, a validate-and-log executor, and ground-truth logging — and every remaining Section 2 procedure is served by exactly these.
-
-Unlike 3.1–3.3, this subsystem is the *sole owner* of few specifications — its ownership is instrumental:
+Published FPGA trading systems validate at three access tiers: live capital in exchange co-location [8], [9]; a broker's test server [2]; or a laboratory setup where a host script injects packets and captures what comes back [6], [7]. AQTA sits at the laboratory tier — co-location and broker-member access are out of scope for a capstone — so this subsystem must supply by itself what the upper tiers get from their environment: the market data, the counterparty, and the measurement fixture. The tier also fixes the right engineering form, which is deliberately small: **one real dataset, three short host scripts, and Wireshark, with every correctness judgment made offline rather than in a runtime component.** The simulator is thus both the exchange and the project's principal verification instrument: FS1's reference packet sequence, FS2's measurement input, FS13's captured packets, NFS2's frame counts, and NFS4's 6.5-hour session all come from here.
 
 | Spec | Simulator role |
 |---|---|
-| **FS1, FS2** | Instrument: emits the reference packet sequences these measurements are defined against — fixed, hash-named slices of the replay dataset; ground-truth log provides transmit-side timestamps. |
-| **FS13** | Oracle: independently parses and validates every received order packet against the documented layout — a second implementation of the protocol spec, which is the strongest practical test of the spec document's completeness (a mechanism already vindicated during design — on the TX-side Table 3.1.4 rather than on Table 3.1.5 itself: see the Modify-semantics finding in 3.4.4.5; the live RX-side cross-parse remains pending). |
-| **NFS2** | Peer: the other endpoint of the 10-minute zero-drop window; its TX count is the expected-frame denominator. |
-| **NFS4** | Provider: replays the full 6.5-hour session the SoC must survive. |
-| **FS6/FS7 (bootstrap)** | Data source: before any live sessions exist, the recorded replay session is the FS7 backtest bootstrap corpus (3.3.3.3's bootstrap case); regime classification draws on the daily-OHLCV source (Yahoo Finance, 3.3.1), not on simulator output. |
-| **NFS3** | The simulator is pure software on the host PC, which NFS3 explicitly excludes from the cost cap — subsystem hardware cost is $0. |
+| **FS1, FS2** | Instrument: reference packet sequences are fixed slices of the replay dataset; the Replayer's TX log provides transmit-side timestamps. |
+| **FS13** | Oracle: the Offline Checker independently parses every captured order packet against the Table 3.1.4 layout. |
+| **NFS2** | Peer: the other endpoint of the 10-minute zero-drop window; the expected frame count is a static property of the frame file. |
+| **NFS4** | Provider: replays the full 6.5-hour real session. |
+| **FS6/FS7 (bootstrap)** | Data source: the recorded replay session is the FS7 backtest bootstrap corpus (3.3.3.3); the regime path uses Yahoo daily OHLCV (3.3.1) instead. |
+| **NFS3** | Pure host software — subsystem hardware cost is $0 (the host PC is excluded from the cap). |
 
-Figure 3.6 shows the simulator's internal structure and its two link-level interfaces. *(Figure placeholder — component diagram: LOBSTER Replay Driver [translation layer + pacing clock] → [Book Mirror, Protocol Encoder → EventSink: UDP TX]; UDP RX → Order Executor → Ground-Truth Logger; all components writing to the Ground-Truth Logger.)*
+Figure 3.6 shows the structure. *(Figure placeholder — two lanes: offline — LOBSTER files → Dataset Preprocessor → frame file + expected-book file; online — Replayer → UDP TX → PL; PL → UDP RX → Order Receiver → order log; post-session — FS13 Offline Checker, book diff against the expected-book file; Wireshark on the NIC.)*
 
 ---
 
 ## 3.4.2 Engineering Design Process
 
-### Decision 1 — Market-data source: a four-iteration design history
+Two decisions define this subsystem; both were settled by external constraints and the published record.
 
-This decision went through four documented iterations driven by successively discovered external constraints; each reversal is retained because the constraints, not preferences, did the deciding.
+### Decision 1 — Market-data source: replay a real captured L3 trading day
 
-**Iteration 1 — broker paper-trading account as the exchange (initial concept, rejected).** The most "real" option available to the team: use a retail broker's simulated-trading environment (Interactive Brokers, Webull, Futu-class APIs) as the live counterparty, so the SoC trades real market data with fake money. Two structural mismatches killed it. (1) *Interface*: broker APIs are REST/WebSocket sessions to the broker's cloud, with latencies in the tens-of-milliseconds-to-seconds class — they cannot terminate our point-to-point PL GbE link or speak the FS13/Table-3.1.4 custom UDP protocol, so the entire PL path (the project's core) would be untestable against them. (2) *Reproducibility*: live market data is unrepeatable by definition; a failed FS2 run could never be re-run on identical input, and no measurement defined against a reference packet sequence (FS1/FS2) can even be specified.
-
-**Iteration 2 — the granularity ceiling (real-data ambitions narrowed by evidence).** Rejecting the broker *interface* did not settle whether real market *data* could still drive the simulator. Investigating this surfaced a harder constraint: the custom protocol carries **L3 order-level events** (Add/Modify/Delete keyed by `order_id`, Table 3.1.4), but retail-tier APIs top out at **L2**. Interactive Brokers' own documentation defines its market-depth product as "level II," delivered as *aggregated price-level rows* (position/operation/price/size callbacks) with no order identifiers [10] — and depth subscriptions are per-venue paid market-data lines whose availability on paper accounts is itself conditional. The published record confirms this is a structural boundary, not a shopping failure: the one cited system that operated against genuine order-level exchange messaging below the co-location tier did so through a *futures-broker member test server* [2], and He et al.'s order-book-update work drew CFFEX message streams from the exchange's internal unified data bus — access mediated by an institutional research relationship, not a public endpoint [3]. No tier of the literature obtains L3 through a retail channel, because no retail channel carries it.
-
-**Iteration 3 — real L3 exists after all, behind a price wall with a free crack (the LOBSTER discovery).** The academic market-microstructure community solved exactly this access problem a decade ago: LOBSTER reconstructs order-level limit-order-book data — every submission, cancellation, deletion, and execution, keyed by order ID — for the entire NASDAQ universe from Historical TotalView-ITCH files [11], and has served as the community's standard source since 2013. Full access is a paid academic subscription (published price list: £6,897/year [12]) — out of the question for a capstone. But LOBSTER publishes **free official sample files** [13]: one full trading day (2012-06-21) for AAPL, AMZN, GOOG, INTC, and MSFT at 1/5/10/30/50 book levels, each comprising a `message` file (time, type, order ID, size, price, direction — the L3 event stream itself) and a level-by-level `orderbook` snapshot file. One day of five symbols is a bounded corpus — but the prototype's needs are bounded to match (one exchange, one symbol, FS14), and the day is exactly sufficient for what the instrument identity needs from real data: a ground-truth check that the protocol and the translation semantics survive contact with a real order flow, and a full-length real session to replay. (The team notes, without needing it as evidence, that published FPGA order-book work has used this same sample day and ticker set — e.g., the MSFT 2012-06-21 dataset in [14].)
-
-**Iteration 4 — final architecture: replay only, one driver.** The end state is a single **LOBSTER-replay driver**: the real AAPL sample day streams through a translation layer (3.4.4.5), the Protocol Encoder, and the UDP EventSink onto the link. Earlier drafts paired it with a seeded synthetic order-flow generator plus a scenario engine for scripted faults and bursts; those components existed to serve the NFS8/NFS9 injector roles and left the design when those specs were dropped (Section 2 note). Everything verification still needs from the data source, replay provides more cheaply:
-
-| Property | How the replay driver provides it |
+| Alternative | Outcome |
 |---|---|
-| Reproducibility | The dataset file's hash names the session: same file + same config ⇒ bit-identical byte stream (measured, 3.4.4.2). FS1/FS2 reference sequences are fixed slices of the day, cited by hash + slice bounds. |
-| Realism | The stream *is* a real NASDAQ trading day — no statistical model to defend, no calibration to maintain. |
-| Volume and shape | 400,391 messages over one complete 6.5 h session — exactly the session NFS4 requires and NFS2's 10-minute window slices from. |
-| Rate control | A replay-clock scale factor (Decision 3), not a generator. |
+| Broker paper-trading counterparty | **Rejected.** Broker APIs are cloud REST/WebSocket sessions — they cannot terminate the point-to-point PL GbE link or speak the custom UDP protocol, so the PL path would be untestable. Live data is also unrepeatable, so FS1/FS2 reference sequences could not even be specified. And retail APIs top out at L2 (aggregated price levels, no order IDs [10]) while the protocol carries L3; the literature obtains order-level data only through member or institutional channels [2], [3]. |
+| Synthetic order-flow generator | **Rejected.** Meets the protocol formats, but its realism (rates, event mix, burst structure) would itself need modeling and defense — effort no specification consumes. |
+| **Replay of a real captured L3 day (selected)** | **Selected.** Realism is free (the stream *is* a real NASDAQ day), reproducibility is structural (a fixed file), and one full 6.5 h session is exactly what NFS4 needs. |
 
-This iteration history is also the origin of two protocol-level findings (sub-penny prices; Modify-semantics ambiguity) reported in 3.4.4.5 — discoveries that would not have occurred under Iteration 1's architecture and that alone justify the investigation's cost.
+The data exists in exactly the required form: LOBSTER reconstructs order-level book data from NASDAQ TotalView-ITCH [11]; full access is a paid subscription [12], but the official free samples [13] include one complete trading day (AAPL, 2012-06-21) as a `message` file (the L3 event stream) plus an `orderbook` file (the book state after every message). The AAPL day at 10 book levels matches the PL book depth (Table 3.1.5), and published FPGA order-book work has validated against this same sample day [14]. The orderbook file is a ready-made per-message ground truth — it lets the PL book be verified without the simulator ever maintaining a book of its own (3.4.3.1). The dataset and the protocol were exercised together at design time by pushing the full day (400,391 messages) through a prototype of the translation layer: that run measured the day's rates (~17 msg/s average, ~2,400 msg/s worst 100 ms burst — the figures used throughout this section) and caught two protocol ambiguities early enough to fix the document rather than debug hardware — sub-penny prices (resolved by the integer-cent rounding of 3.1.3.2) and whether a Modify's `qty` is absolute or a delta (resolved in Table 3.1.3: absolute remaining quantity).
 
-### Decision 2 — Execution model: full matching engine vs. validate-and-log executor under a no-impact assumption
+### Decision 2 — Execution model: validate-and-log, all judgment offline
 
-| Alternative | Description | Outcome |
-|---|---|---|
-| Full price-time-priority matching engine | Received orders rest in the simulator's book, match against the replayed flow, and produce fills; our orders alter the market-data stream. | **Rejected for the prototype.** A matching engine is a substantial correct-by-construction artifact (price-time priority, partial fills, self-match handling) whose output — realistic fills and market impact — no Section 2 specification consumes. Under the C2 fill-semantics decision, fill timing is modeled PS-side; the simulator does not need to adjudicate fills at all. The cost would be large, the verification burden larger (the matching engine would itself need a test bench), and the marks zero. |
-| Validate-and-log executor, no-impact assumption (selected) | Every received order packet is parsed against the FS13 layout, range-checked, timestamped, and logged; the replayed market-data stream is **not** altered by received orders. | **Selected.** This is exactly the FS13 oracle role: an independent second implementation of the protocol parse is the strongest practical check of the spec document (any ambiguity in Table 3.1.5 surfaces as a disagreement between the PL encoder and the simulator parser — at which point the *document* gets fixed, which is FS13's actual point; 3.4.4.5 records this second-implementation mechanism already firing once during design — on the TX-side Table 3.1.4 (Finding 2), with the Table 3.1.5 cross-parse itself pending live integration). The no-impact assumption is stated openly as a modeling boundary: with FS3 capping orders at 1,000 shares against a book quoting thousands of shares per level, self-impact would be second-order even if modeled.  |
+| Alternative | Outcome |
+|---|---|
+| Full matching engine (received orders match against the replayed flow and produce fills) | **Rejected.** A large correct-by-construction artifact whose outputs no Section 2 spec consumes — and it would itself need a test bench. |
+| **Paced replay + validate-and-log (selected)** | **Selected.** The replayed stream is never altered by received orders; every received packet is captured with a timestamp and checked offline against the FS13 layout. |
 
-**The closed-loop caution from the literature.** The survey of deployed systems is blunt about open-loop order emission: only the Toshiba production systems close the post-trade loop, pairing the FPGA's inline order path with CPU-side order confirmation and position-state management [8], [9] — because an exchange-facing device that fires orders without tracking their disposition carries unbounded exposure. AQTA's architecture already embodies this division: the PS-side Runtime Risk Guard and open-order table (3.2.3.3, amended FS3/FS14) are the CPU-side state machine, and the C2 fill model closes the loop in simulation. If fill semantics are later upgraded to C1, the executor gains exactly one behavior — emit a `msg_type 0x04` execution report over the same link after a configurable delay — without touching the replay driver or book mirror; the decision structure deliberately leaves that seam open.
+The published record splits on exactly this line: the one surveyed system with a full matching engine validates it against synthetically generated commands in an RTL testbench [18] — the matching engine substitutes for real data the authors did not have. Systems that *have* real data replay it and do not match against their own orders [3], [14], [8]. AQTA needs no fills from the simulator: fill timing is modeled on the PS side (fill delay **T**, 3.2.3.3.1), order disposition is tracked by the PS open-order table and Risk Guard (3.2.3.3, FS14), and with FS3 capping orders at 1,000 shares against a book quoting thousands per level, market impact would be second-order even if modeled.
 
-### Decision 3 — Replay pacing: dataset-clock pacing vs. free-running emission
+Since nothing needs to be decided at runtime, all intelligence moves off the session path: a preprocessor materializes everything expensive once, the live path is a paced `sendto` loop plus a `recvfrom` logger, and parsing and comparison run afterwards against the logs. That a plain Python script suffices is settled by one chain of rates, each comfortably below the next:
 
-| Alternative | Description | Outcome |
-|---|---|---|
-| Free-running emission | Emit events as fast as the Python loop can push them. | **Rejected as the session mode.** It destroys the session's temporal shape — NFS4's 6.5-hour session collapses to seconds, open/close activity concentration disappears, and TX timestamps become meaningless for the FS2/NFS1 cross-checks. Retained as a smoke-test utility only. |
-| **Dataset-clock pacing with a scale factor (selected)** | Each LOBSTER message carries its original NASDAQ timestamp; the replay scheduler emits at `session_start + (t_msg − t_open)/rate_scale`. | **Selected.** `rate_scale = 1` reproduces the real day for the NFS4/NFS2 runs; `rate_scale > 1` compresses idle stretches for development iterations. Pacing granularity is bounded by host timer resolution (~1 ms) — three orders of magnitude below the day's mean inter-arrival gap (~58 ms at 17.1 msg/s), so session-scale timing is faithful; inside the densest 100 ms bursts (sub-millisecond gaps) individual spacings are smeared by timer granularity while burst mass at the 100 ms scale is preserved. Acceptable because no remaining specification measures sub-millisecond inter-arrival fidelity. |
+```
+real day, worst burst     ~2,400 msg/s    (measured, Decision 1)
+replay script, max send   ~91,000 msg/s   (measured)
+PS decision ceiling       ~200,000 /s     (analysis, 3.2.4.1)
+PL wire ceiling           ~1.39 M pkt/s   (arithmetic, 3.1.2)
+```
 
-A pacing knob is all that remains of what earlier drafts spent two further decisions on (an offline/online rate split for line-rate stress generation, and a declarative scenario-file mechanism for scripted fault directives — both serving the dropped NFS8/NFS9 roles); the replay-only architecture reduces the simulator's control surface to one number and one dataset.
+The sender is the bottleneck, and that is the right place for it: the script clears the worst real burst with a ~38× margin, no rate this subsystem can produce stresses the PL, and the PS can keep up with every tick at any replay speed.
 
 ---
 
 ## 3.4.3 Final Design Details
 
-### 3.4.3.1 Component structure and data flow
+### 3.4.3.1 Components and artifacts
 
-One Python process, five components, one thread on the hot path:
+**Dataset Preprocessor (offline, once per slice).** Reads the LOBSTER message and orderbook files and slice bounds. Its translation layer tracks the order pool, rewrites Modify events to the order's new absolute remaining quantity (Table 3.1.3's `qty` semantics), rounds sub-penny prices to integer cents (per 3.1.3.2), and prepends a priming prefix of Add events reconstructing the book at slice start, so that the ~2% of messages referencing pre-session orders resolve. It runs at ~1 M msg/s — the full day translates in under a second. Two artifacts:
 
-1. **LOBSTER Replay Driver** — loads the session config and owns the master event clock (Decision 3); streams the real message file through the translation layer of 3.4.4.5, after a book-priming step for pre-session orders; emits abstract L3 events that are always consistent with the Book Mirror's state (invariant I1, 3.4.4.3).
-2. **Book Mirror** — applies each emitted event to the simulator's own copy of the book; this is the ground-truth book against which the PL's order-book construction (3.1) is verified.
-3. **Protocol Encoder** — packs events into the Table 3.1.4 layout.
-4. **EventSink (UDP TX)** — transmits the encoded stream over the point-to-point link.
-5. **Order Executor (validate-and-log) + Ground-Truth Logger** — parses every received order packet against Table 3.1.5 (FS13 oracle) and appends it to the ground-truth log; the logger also records every transmitted event with a host timestamp.
+1. **Frame file** — the slice pre-encoded into Table 3.1.3 payloads, each frame keeping its original NASDAQ timestamp for pacing.
+2. **Expected-book file** — per-message top-of-book, derived from LOBSTER's own orderbook file with the same cent rounding applied. Exported PS snapshots carry the PL `SEQ` they were decided against (3.2.3.5), which maps one-to-one onto frame index, so each snapshot is diffed against its expected-book row directly.
 
-### 3.4.3.2 Session configuration and ground-truth log
+The preprocessor asserts three sanity checks on every run — every Modify/Delete references a known order, no book quantity goes negative, and every encoded frame decodes back to its source event — and all three passed with zero violations across the full real day. Its output is also deterministic: two passes over the same file and parameters produce byte-identical streams, which is what makes FS7's bootstrap corpus reproducible end-to-end.
 
-**Session config (JSON):** `{dataset_path, dataset_sha256, slice: [first_msg, last_msg] | full, rate_scale, symbol_id}`. The dataset hash *is* the session: same file + same config + same replayer version ⇒ bit-identical byte stream (measured, 3.4.4.2), so a session is *named* by its config file, and every verification run cites one — FS1/FS2 reference sequences are simply configs with fixed `slice` bounds.
+**Replayer (online).** Reads the frame file and transmits each frame at `session_start + (t_msg − t_open)/rate_scale` (priming prefix sent back-to-back first), logging frame index + TX timestamp per frame. A timed `sendto` of pre-encoded bytes.
 
-**Ground-truth log (append-only, one line per event):** `{host_ts_ns, dir: TX, raw_bytes_hex, decoded_fields, book_top_after}` for TX; `{host_ts_ns, dir: RX, raw_bytes_hex, parse_result, fault_code?}` for RX. This log is the **golden reference** the other subsystems' logs are diffed against: the PL's book (via PS snapshots in the FS5 export) against `book_top_after`; PS decision timestamps against TX/RX host timestamps for the FS2/NFS1 cross-checks (single host clock covers both directions; Wireshark on the same NIC remains the primary instrument, the ground-truth log the redundant second witness). The full `raw_bytes_hex` output can be disabled for long runs, retaining only the parsed fields; at the real day's rates even full-mode logging is ≈ 48 MB per session (3.4.4.4), so this is a tidiness option rather than a storage necessity.
+**Order Receiver (online).** Appends every received packet — raw bytes + RX timestamp — to the order log. Never parses, never replies.
+
+**FS13 Offline Checker (post-session).** Parses every logged order packet against Table 3.1.4 and range-checks each field. As an independent second implementation of the protocol spec, any disagreement with the PL encoder indicts the *document* — the mechanism that already caught the Modify-semantics ambiguity during Decision 1's prototype run, before any hardware existed.
+
+A full session's logs total tens of MB and average wire utilization is around 0.001% of the GbE link — data volume is a non-issue, so the NFS4 soak run keeps full logging on throughout.
+
+### 3.4.3.2 Replay pacing
+
+`rate_scale` is a command-line parameter: 1 reproduces the real day's timing; larger values compress it. Host timer resolution (~1 ms) is far below the day's mean message gap (~60 ms), so pacing is faithful at session scale. The ~38× send margin doubles as the **maximum faithful compression factor**: up to about `rate_scale = 38`, even the densest real burst stays within send capability and every frame lands on its scaled timestamp.
+
+Usage rule: development and demo runs compress (`rate_scale = 20` replays the whole day in under 20 minutes with its burst structure intact) or replay a dense slice at real speed; verification runs anchored to wall-clock time — NFS4's soak, FS2's 1000-update measurement, NFS2's 10-minute window — use `rate_scale = 1`, because the PS's rate limit, fill delay **T**, and snapshot sampling are wall-clock-based.
 
 ### 3.4.3.3 Link and host configuration
 
-Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained drops" argument depends on this), static IP/MAC matching the PL's compile-time constants (3.1.3.1), UDP checksum emitted as zero (per 3.1.3.1's accept-zero decision — the PL parser ignores the field). The simulator host may be the same physical machine as the EOD server; however, they execute as strictly independent processes with zero intraday coupling. Wireshark/tcpdump capture on this NIC is the shared instrument for FS2/NFS1/NFS2 procedures.
+Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained drops" argument depends on this), static IP/MAC matching the PL's compile-time constants (3.1.3.1), UDP checksum emitted as zero (the PL ignores the field; integrity is covered by the Ethernet FCS). The simulator may share a physical machine with the EOD server but runs as an independent process. Wireshark on this NIC is the primary instrument for FS2/NFS1/NFS2; the TX and RX logs share the host clock and serve as a second witness.
 
 ---
 
-## 3.4.4 Quantitative Technical Analysis
-
-### 3.4.4.1 Session-mode rate capability — measured
-
-Microbenchmarks on the development sandbox (Python 3, loopback socket, 20–24 B payloads; caveat: loopback ≠ real NIC path — order-of-magnitude evidence; confirmed via re-run on the final target host NIC) measured the full online emit path — event preparation + book-mirror update + `struct.pack` encode + UDP `sendto` — at **≈ 91 K events/s** sustained, single-threaded. Set against the *measured* profile of the real day (3.4.4.5: 17.1 msg/s session average, 584 msg/s peak second, 2,390 msg/s peak 100 ms burst equivalent), that is a **~38× margin over the worst real burst and ~5,000× over the session average**. Session-mode feasibility in plain Python is settled by arithmetic: no faster language, batching, or raw-socket work is needed at any rate this data source can produce.
-
-### 3.4.4.2 Reproducibility — measured
-
-Same-input reproducibility was checked directly rather than asserted: two full replay passes over the same dataset and config produce **byte-identical** output streams (verified during the 3.4.4.5 validation runs, 380,678 encoded events). The design conditions this rests on: single-threaded replay, integer arithmetic in the translation layer, and no wall-clock dependence in event *content* (host timestamps appear only in the ground-truth log, never in the byte stream); the input itself is pinned by the `dataset_sha256` field of the session config. Consequence chain: deterministic byte stream ⇒ deterministic PL book states ⇒ deterministic PS snapshot sequence ⇒ FS7's backtest bootstrap corpus is reproducible end-to-end from the dataset hash.
-
-### 3.4.4.3 Replay correctness invariants (the simulator's own test plan)
-
-The simulator is a verification instrument, so its own correctness needs an argument that does not circularly depend on the system under test. Three machine-checkable invariants, enforced in the replay driver and executor and asserted in tests (validated via full-dataset replays):
-
-| Invariant | Statement | Why it matters downstream | Real-data status (3.4.4.5) |
-|---|---|---|---|
-| I1 — referential integrity | Every Modify/Delete references an `order_id` currently live in the Book Mirror | The PL book builder (3.1.3.1 stage 5) is entitled to assume well-formed L3 flow | Enforced by the translation layer; 2.09% of raw LOBSTER messages reference pre-session orders and are handled by book-priming (pre-loading the initial limit order book state before the session begins). |
-| I2 — book non-negativity | No aggregate level quantity ever goes negative; no order's remaining quantity goes negative | Ground-truth `book_top_after` must be a valid book or the golden reference is worthless | **0 violations** across 400,391 real messages |
-| I3 — encode/decode round-trip | `decode(encode(event)) == event` for the simulator's own encoder against its own Table-3.1.4 parser | The oracle property of Decision 2: self-round-trip is its base case | **0 failures** across 380,678 real encoded events |
-
-### 3.4.4.4 Session data-volume arithmetic (NFS4 soak, log sizing)
-
-```
-6.5 h replayed session (the real day: 400,391 messages ≈ 17 msg/s average):
-Ground-truth log, full mode (~120 B/line with hex):   400,391 × 120 B ≈ 48 MB/session
-Ground-truth log, parsed-fields mode (~40 B/line):    400,391 × 40 B  ≈ 16 MB/session
-Wire traffic: 400,391 × 90 B ≈ 36 MB over 6.5 h ≈ 0.012 Mbps average — link utilization ~0.001%;
-NFS2/NFS4 stress the SoC's endurance, not the wire
-```
-
-Every figure is trivial on host disk — the NFS4 soak run can keep full-hex logging enabled throughout.
-
-### 3.4.4.5 Real-data validation: LOBSTER replay through the protocol layer — measured
-
-The full free-sample dataset — 400,391 real order-level messages, AAPL, one complete NASDAQ trading day (2012-06-21), top-10 book levels [13] — was run through a prototype of the replay driver's translation layer and the Table 3.1.4 encoder. This is a validation of the *protocol and translation semantics against real order flow*, executed at design time precisely so its findings could shape the design rather than audit it. Four results and two findings:
-
-**Result 1 — real rate profile (supersedes all earlier estimates).** Session average **17.1 msg/s**; peak one-second rate **584 msg/s**; peak 100 ms burst **2,390 msg/s equivalent**. These figures replace the guessed rate estimates carried by earlier drafts and anchor the margins in 3.4.4.1. They also put the wire in perspective: the link's physical ceiling of 1.389 M pps (3.1.4.1) exceeds this real symbol's *peak burst* by ~580× — the PL's line-rate capability is engineering margin far beyond anything real single-symbol flow produces, context worth stating now that no stress specification exercises it.
-
-**Result 2 — event-mix characterization.** Real composition: submissions 47.7%, full deletions 42.7%, visible executions 5.9%, hidden executions 2.8%, partial cancels 0.8%. This stands as the reference characterization of the replayed flow — and it corrects the working figures carried by earlier drafts (55/25/20), which were materially wrong about modify frequency: real flow is add/delete-dominated, and modifies are rare.
-
-**Result 3 — field-width confirmation.** Max real `order_id` = 287,150,931 (u32: fits, 15× headroom); max size 15,000 shares (u32: trivial). Table 3.1.4's field widths survive contact with real data.
-
-**Result 4 — translation throughput and invariants.** The Python translation layer (order-pool tracking + encode) processed the full day at **1.10 M msg/s** — the entire real session translates offline in 0.37 s, so replay preparation is never a cost. I2 and I3 passed with zero violations across the full dataset (table in 3.4.4.3).
-
-**Finding 1 — sub-penny prices break the integer-cents assumption (protocol change required or policy needed).** 372 of 400,391 real events (0.09%) carry prices that are *not* whole cents (LOBSTER prices are dollars ×10⁴; these events have a nonzero residue mod 100 — sub-penny executions/price-improvement prints). The Table 3.1.4 `price` field is specified in integer cents, so these events cannot be represented exactly. **Design decision:** the integer-cents commitment is retained (zero protocol change), preserving the deterministic parity chain across the PL and PS. Sub-penny prices are rounded half-to-even to the nearest cent — 0.09% of events carry ≤ $0.005 error — and a `price_rounded` diagnostic counter records every occurrence so the approximation stays observable.
-
-**Finding 2 — the Modify-semantics ambiguity (the FS13 oracle mechanism fired at design time).** Writing the translation forced a question Table 3.1.4 does not answer: does a Modify's `qty` field carry the *new absolute* quantity or a *delta*? LOBSTER's partial-cancel and execution events carry deltas; the translation had to pick a convention (absolute remaining quantity was chosen) and the PL book-update stage must agree or the books diverge silently. This is precisely Decision 2's claim — that an independent second implementation is the strongest test of the protocol document — vindicated before any hardware exists: the ambiguity is now a required amendment to Table 3.1.4's field description rather than a future integration bug. **Design decision:** Table 3.1.4's field description is amended to define `qty` as the order's new absolute remaining quantity, allowing the PL book-update stage to remain stateless with respect to order deltas.
-
-**Honest scope statement.** This validation exercises the translation layer and encoder on the development sandbox; it does not exercise the physical link, the PL parser, or timing (those are the Section 2 procedures, which remain pending). One symbol-day is a semantic ground-truth check, not a statistical study; the mix and rate figures above are one liquid large-cap's behavior on one 2012 day and are used as *characterization anchors*, not as claims about markets in general. That single day is also the prototype's entire market-data corpus — a deliberate scope bound stated in 3.4.1, not a hidden limitation.
-
----
-
-## 3.4.5 Specification Compliance / Instrumentation Summary
+## 3.4.4 Specification Compliance Summary
 
 | Spec | What the simulator provides | Evidence status |
 |---|---|---|
-| FS1/FS2 (instrument) | Fixed replay slices as reference sequences (cited by dataset hash + slice bounds, 3.4.3.2); TX-side ground-truth timestamps | Design complete; pending slice-config authoring |
-| FS13 (oracle) | Independent parse of every order packet; disagreements surface spec ambiguities | Mechanism validated at design time (Finding 2 — TX-side analog on Table 3.1.4); pending live RX-side cross-parse |
-| NFS2 (peer) | Direct-cabled link peer; TX frame counts as expected-delivery denominator | Pending 10-min counted run |
-| NFS4 (provider) | 6.5 h real-day replay at `rate_scale = 1`; full-mode logging ≈ 48 MB (3.4.4.4) | Pending soak run |
-| FS6/FS7 (bootstrap) | The recorded replay session as the FS7 bootstrap corpus (3.3.3.3); regime path draws on Yahoo daily OHLCV (3.3.1), not simulator output | Real-data translation validated (3.4.4.5); recorded session pending |
-| Own correctness | Invariants I1–I3; reproducibility (measured); rate margin (measured); real-data validation (measured, full dataset) | Sandbox-measured; target-host re-runs pending |
+| FS1/FS2 (instrument) | Reference sequences as preprocessed slices; TX log as second timing witness | Design complete; pending slice authoring |
+| FS13 (oracle) | Offline parse of every captured order packet against Table 3.1.4 | Mechanism validated during Decision 1's prototype run; pending live cross-parse |
+| NFS2 (peer) | Direct-cabled peer; expected frame count static in the frame file | Pending 10-min counted run |
+| NFS4 (provider) | 6.5 h real-day replay at `rate_scale = 1` | Pending soak run |
+| FS6/FS7 (bootstrap) | Recorded replay session as FS7 bootstrap corpus (3.3.3.3) | Translation validated at design time; recorded session pending |
+| NFS3 | Host software only — $0 hardware | By construction |
+| Own correctness | Sanity checks, determinism, and send-rate margin all measured (3.4.3.1, 3.4.2) | Sandbox-measured; target-host re-run pending |
 
 ---
 
@@ -832,9 +773,9 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 
 [7] R. Osuna, B. Reponte, and L. G. Ramirez, "Low-latency Ethernet communications on FPGA SoC for high frequency trading," Kastner Research Group, University of California, San Diego, San Diego, CA, USA, Tech. Rep., Jun. 2025. [Online]. Available: https://kastner.ucsd.edu/wp-content/uploads/2025/06/admin/highfrequencytrading.pdf
 
-[8] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Real-time Trading System based on Selections of Potentially Profitable, Uncorrelated, and Balanced Stocks by NP-hard Combinatorial Optimization," Corporate Research and Development Center, Toshiba Corporation, Japan, 2023.
+[8] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Real-time Trading System Based on Selections of Potentially Profitable, Uncorrelated, and Balanced Stocks by NP-Hard Combinatorial Optimization," *IEEE Access*, vol. 11, pp. 120023–120036, 2023, doi: 10.1109/ACCESS.2023.3326816.
 
-[9] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Pairs-trading System using Quantum-inspired Combinatorial Optimization Accelerator for Optimal Path Search in Market Graphs," Corporate Research and Development Center, Toshiba Corporation, Japan, 2023.
+[9] K. Tatsumura, R. Hidaka, J. Nakayama, T. Kashimata, and M. Yamasaki, "Pairs-Trading System Using Quantum-Inspired Combinatorial Optimization Accelerator for Optimal Path Search in Market Graphs," *IEEE Access*, vol. 11, pp. 104406–104416, 2023, doi: 10.1109/ACCESS.2023.3316727.
 
 [10] Interactive Brokers, "Market Depth (Level II)," TWS API v9.72+ Documentation. [Online]. Available: https://interactivebrokers.github.io/tws-api/market_depth.html [Accessed: Jul. 9, 2026].
 
@@ -852,10 +793,12 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 
 [17] 正点原子 (ALIENTEK), "领航者 ZYNQ 之嵌入式开发指南 / Navigator ZYNQ-7020 Development Board User Manual (XC7Z020CLG400-2I)," Guangzhou Xingyi Electronic Technology Co., Ltd. [Online]. Available: http://www.openedv.com/docs/boards/fpga/zdyz_linhanzhe.html [Accessed: Jul. 10, 2026].
 
+[18] S. Puranik, M. Barve, S. Rodi, and R. Patrikar, "Acceleration of Trading System Back End with FPGAs Using High-Level Synthesis Flow," *Electronics*, vol. 12, no. 3, art. 520, Jan. 2023, doi: 10.3390/electronics12030520.
+
 ### Further reading (uncited in this document)
 
 - D. H. Bailey, J. M. Borwein, M. López de Prado, and Q. J. Zhu, "The Probability of Backtest Overfitting," *Journal of Computational Finance*, vol. 20, no. 4, pp. 39–69, 2017, doi: 10.21314/JCF.2016.322.
 - FIX Trading Community, "FIX Adapted for STreaming (FAST) Specification." [Online]. Available: https://www.fixtrading.org/standards/fast-online/ [Accessed: Jul. 9, 2026].
 - J. Zang, "quant-engine: a C++ quantitative backtest and research engine," independent project documentation. [Online]. Available: https://qe.jiucheng-zang.ca [Accessed: Jul. 2026].
 
-`[TEAM: bibliography housekeeping — (i) confirm the Toshiba entries' actual venues (both appear to be published papers; locate DOI/venue before submission); (ii) confirm the citation style guide for online resources; (iii) Hamilton 1989 is now in the list as [15]; Bailey et al. 2017 (backtest overfitting) moved to Further Reading since the grid-vs-Bayesian comparison it supported was cut; FinBERT/Araci and Loughran-McDonald were removed with the FS9/FS10 text-sentiment path (Section 2 footnote). TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
+`[TEAM: bibliography housekeeping — (i) confirm the citation style guide for online resources; (ii) Hamilton 1989 is now in the list as [15]; Bailey et al. 2017 (backtest overfitting) moved to Further Reading since the grid-vs-Bayesian comparison it supported was cut; FinBERT/Araci and Loughran-McDonald were removed with the FS9/FS10 text-sentiment path (Section 2 footnote); Toshiba entries [8]/[9] venues confirmed (IEEE Access vol. 11, 2023, DOIs in place). TradingAgents 2024/2412.20138 remains a pending citation, to be appended if and when actually cited.]`
