@@ -210,7 +210,7 @@ Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 
 ## 3.2.1 Overview and Specification Mapping
 
-The PS subsystem is the software half of the intraday trading loop on the XC7Z020's dual-core ARM Cortex-A9. Core 1 is isolated from the Linux scheduler and owns the hot path: busy-poll the PL snapshot registers, evaluate the active strategy, apply the Runtime Risk Guard, and write approved order fields back through the register bank and doorbell. Core 0 owns latency-tolerant work: configuration loading, log draining/export, Debug-UART reporting, and session supervision.
+The PS subsystem is the software half of the intraday trading loop on the selected XC7Z020 Zynq-7000 device, whose family provides a dual-core ARM Cortex-A9 processing system [19]. Core 1 is isolated from the Linux scheduler and owns the hot path: busy-poll the PL snapshot registers, evaluate the active strategy, apply the Runtime Risk Guard, and write approved order fields back through the register bank and doorbell. Core 0 owns latency-tolerant work: configuration loading, log draining/export, Debug-UART reporting, and session supervision.
 
 The division of labour with the PL follows one rule established in 3.1: the PL owns wire-speed determinism; the PS owns session-to-session changeability. Strategy formulas, parameters, and risk limits are replaced by the EOD pipeline (Section 3.3), so iterating on them must not require FPGA re-synthesis.
 
@@ -237,7 +237,7 @@ Quantitative analysis for latency, interface capacity, Risk Guard cost, and logg
 
 | Alternative | Description | Outcome |
 |---|---|---|
-| Strategy in PL | Implement decision rules as fabric logic; sub-microsecond tick-to-order. | **Rejected.** Strategy formulas, thresholds, and the active strategy identity change nightly via the EOD JSON config (FS4/FS8). A PL implementation would either require re-synthesis per change (hours per iteration, incompatible with the EOD cycle) or a parameterized rule engine in fabric whose design and verification cost exceeds the entire remaining PL budget. Industry practice concurs: fixed protocol/risk primitives migrate to hardware, iterating alpha logic stays in software. |
+| Strategy in PL | Implement decision rules as fabric logic; sub-microsecond tick-to-order. | **Rejected.** Strategy formulas, thresholds, and the active strategy identity change nightly via the EOD JSON config (FS4/FS8). A PL implementation would either require re-synthesis per change (hours per iteration, incompatible with the EOD cycle) or a parameterized rule engine in fabric whose design and verification cost exceeds the remaining PL schedule. FPGA trading literature supports moving fixed protocol-processing primitives into hardware [1], [4]; this prototype keeps the changeable alpha logic in software. |
 | Strategy in PS (selected) | Evaluate rules on the Cortex-A9 against the observed snapshot. | **Selected.** A software strategy is reconfigured by rewriting a struct, tested with host-compiled unit tests, and debugged with standard tooling. Decision 3's latency budget shows the software path still closes with about 5.5x margin. |
 
 This decision explains why FS2's 30 μs budget is roughly an order of magnitude looser than FS1's 1.5 μs budget: the specification deliberately prices in the software boundary, and Decisions 2-3 prove that the priced-in boundary is still feasible.
@@ -252,7 +252,7 @@ This decision explains why FS2's 30 μs budget is roughly an order of magnitude 
 | NFS4 6.5-hour robustness path (15%) | All failure handling hand-rolled | Mature, observable (logs, watchdogs) |
 | **Weighted result (1–5 scale)** | 2.6 | **4.1 — Selected** |
 
-Linux is selected only with the explicit constraint that the hot path does not run as ordinary scheduled userspace. Core 1 is removed from normal scheduling with `isolcpus`, which Decision 3 relies on; core 0 keeps Linux's filesystem, network, logging, and UART advantages for FS4/FS5/FS11/NFS4. PetaLinux is preferred over a generic image because its Xilinx BSP/device-tree support already covers the AXI-Lite GP port and CPU-isolation workflow. PREEMPT_RT is unnecessary because the isolated core is designed not to re-enter the scheduler during the hot path.
+Linux is selected only with the explicit constraint that the hot path does not run as ordinary scheduled userspace. Core 1 is removed from normal scheduling with `isolcpus`, which Decision 3 relies on; core 0 keeps Linux's filesystem, network, logging, and UART advantages for FS4/FS5/FS11/NFS4. The target image is PetaLinux because the implementation is board-specific; the design depends on Linux services and CPU isolation, not on PREEMPT_RT, because the isolated core is designed not to re-enter the scheduler during the hot path.
 
 ### Decision 3 — Hot-path interface and event delivery: interrupt + DMA ring vs. busy-poll register bank
 
@@ -263,11 +263,11 @@ FS2 caps the software path at 30 μs. The selected design must therefore avoid a
 | Interrupt + DMA ring | DMA IP + driver + coherency | Rejected — interrupt wakeup alone risks consuming most of the budget |
 | **Busy-poll + register bank + doorbell (selected)** | Wizard-generated AXI-Lite slave; zero driver, zero coherency | **Selected** |
 
-Linux IRQ-to-userspace wakeup is treated as 10-40 μs: even the optimistic end consumes one third of FS2 before strategy logic begins. This is consistent with the broader low-latency pattern: Leber et al. identify context switching as the interrupt cost [1], Morris et al. use polling for host-side market data [4], and Toshiba's production systems avoid software interrupts on the trading path [8]. Core 1 therefore busy-polls `SEQ` over M_AXI_GP0 instead of sleeping.
+Linux IRQ-to-userspace wakeup is treated as 10-40 μs: even the optimistic end consumes one third of FS2 before strategy logic begins. This is consistent with the broader low-latency pattern: Leber et al. identify context switching as a central software-latency cost [1], and Morris et al. use polling for host-side market data [4]. Core 1 therefore busy-polls `SEQ` over M_AXI_GP0 instead of sleeping.
 
 DMA also loses its main benefit once a core is already dedicated to waiting: the snapshot is only 16-24 B, so bulk transfer hardware adds driver/coherency work without raising the strategy's processing ceiling. The PL exposes a register snapshot plus `SEQ`; egress is symmetric, with payload fields written first and `DOORBELL` last.
 
-30 μs is about 23,000 cycles at 766 MHz. Allowing about 1 μs for the PL egress tail leaves about 29 μs for software:
+30 μs is about 23,000 cycles at the board's 766 MHz Cortex-A9 frequency [17]. Allowing about 1 μs for the PL egress tail leaves about 29 μs for software:
 
 | Stage | Estimate |
 |---|---|
@@ -297,7 +297,7 @@ The final design follows one tick through the software path: the register bank d
 
 ### 3.2.3.1 The PL/PS register bank and access protocol (interface contract)
 
-The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped through M_AXI_GP0. This table is the interface contract, jointly owned with 3.1:
+The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped through a 32-bit PS-to-PL AXI master port (`M_AXI_GP0` in the Vivado design) on the Zynq interconnect [19]. This table is the interface contract, jointly owned with 3.1:
 
 | Offset | Register | Dir (PS view) | Semantics |
 |---|---|---|---|
@@ -346,7 +346,7 @@ At startup, before core 1 begins polling, the loader validates the JSON configur
 
 The logger is pure software: core 1 writes fixed 128 B records into a pre-allocated 256 MB cached-DDR ring, with no hot-path allocation and therefore no hot-path OOM. Each record is one of: decision, execution outcome, sampled snapshot, Risk Guard reject, or fault. The fixed schema groups type/decision metadata, strategy/reason codes, PL and CPU timestamps, top-of-book fields, emitted-order fields, position/in-flight/PnL state, and reserved growth space.
 
-Full per-tick logging fails by arithmetic: `1.389 M/s × 128 B ≈ 178 MB/s`, and `10 M ticks × 128 B = 1.28 GB`, exceeding the practical memory budget before OS/code are considered. The selected policy instead logs all decision/outcome/reject/fault records, rate-capped by FS3 at 1,000/s, plus snapshots sampled at 100 Hz and on order events. `[TEAM: confirm/cite 100 Hz snapshot sampling policy]` This is about 128 KB/s + 12.8 KB/s = **141 KB/s**, so the 256 MB ring holds about 30 minutes at the worst-case decision rate while core 0 drains continuously to eMMC. Core 0 also performs end-of-session export over PS GbE, periodic `DIAG_*` sampling, and the FS11 1 Hz Debug-UART console feed without charging core 1.
+Full per-tick logging fails by arithmetic: `1.389 M/s × 128 B ≈ 178 MB/s`, and `10 M ticks × 128 B = 1.28 GB`, exceeding the practical memory budget before OS/code are considered. The selected policy instead logs all decision/outcome/reject/fault records, rate-capped by FS3 at 1,000/s, plus snapshots sampled at 100 Hz and on order events. The 100 Hz snapshot rate is a prototype observability policy: it gives 10 ms temporal resolution for session replay/debugging while contributing only 12.8 KB/s, small relative to the 128 KB/s decision-log ceiling. This is about 128 KB/s + 12.8 KB/s = **141 KB/s**, so the 256 MB ring holds about 30 minutes at the worst-case decision rate while core 0 drains continuously to eMMC. Core 0 also performs end-of-session export over PS GbE, periodic `DIAG_*` sampling, and the FS11 1 Hz Debug-UART console feed without charging core 1.
 
 ---
 
@@ -730,6 +730,8 @@ Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained dr
 [17] 正点原子 (ALIENTEK), "领航者 ZYNQ 之嵌入式开发指南 / Navigator ZYNQ-7020 Development Board User Manual (XC7Z020CLG400-2I)," Guangzhou Xingyi Electronic Technology Co., Ltd. [Online]. Available: http://www.openedv.com/docs/boards/fpga/zdyz_linhanzhe.html [Accessed: Jul. 10, 2026].
 
 [18] S. Puranik, M. Barve, S. Rodi, and R. Patrikar, "Acceleration of Trading System Back End with FPGAs Using High-Level Synthesis Flow," *Electronics*, vol. 12, no. 3, art. 520, Jan. 2023, doi: 10.3390/electronics12030520.
+
+[19] Xilinx, "Zynq-7000 SoC Data Sheet: Overview," DS190, v1.11.1, Advanced Micro Devices, Inc., Jul. 2018. [Online]. Available: https://docs.amd.com/v/u/en-US/ds190-Zynq-7000-Overview [Accessed: Jul. 11, 2026].
 
 ### Further reading (uncited in this document)
 
