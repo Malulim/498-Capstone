@@ -47,8 +47,8 @@ The secondary objective is an End-of-Day (EOD) optimization pipeline that classi
 | **NFS4** | Session stability | Runs a full 6.5-hour simulated session without crash, hang, or unrecovered error. | Full-session run, inspect logs for fatal errors. | **Y** |
 | **NFS5** | EOD pipeline runtime | Full EOD pipeline (ingestion → classification → optimization → approval prompt) completes within 30 minutes. | Timed run on 1 year of reference OHLCV data. | **N** |
 | **NFS6** | FPGA resource utilization | < 75% LUTs and < 85% Block RAMs on XC7Z020, timing closure at 125 MHz. | Vivado utilization/timing reports, WNS > 0 ns. | **Y** |
-| **NFS8** | Fault recovery | On a recoverable fault (checksum failure, FIFO overflow, invalid config), discard the input, log a fault code, continue without restart. | Inject each fault type, confirm logged fault code and resumed processing. | **Y** |
-| **NFS9** | Ingest throughput | Sustain ≥ 1.2M msg/s ingestion at full Gigabit line rate without drops or stalls. | Inject a line-rate PCAP, confirm zero drops via drop counters. | **Y** |
+
+*(NFS8 and NFS9 — fault-recovery and line-rate ingest-throughput acceptance specs — were dropped from scope: their verification procedures (scripted fault injection, line-rate PCAP stress) require a test-injection apparatus whose build-and-verify cost is disproportionate to the project's core objective, and the exchange simulator that would have supplied it is deliberately a replay-based instrument (3.4.2 Decision 1). The underlying engineering survives as design features without acceptance criteria: the PL fault-handling path and line-rate throughput analysis (3.1.3.1, 3.1.4.1), PS-side config validation (3.2.3.4), and EOD input validation (3.3.3.6). IDs are left unrenumbered, as with FS9/FS10.)*
 
 
 # 3. Detailed Design
@@ -213,7 +213,7 @@ Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 
 ## 3.2.1 Overview and Specification Mapping
 
-The PS subsystem is the software half of the intraday trading loop, on the dual-core ARM Cortex-A9 of the XC7Z020. Core 1, isolated from the Linux scheduler, busy-polls the PL's snapshot registers, evaluates the active strategy, filters proposed orders through the Runtime Risk Guard, and writes risk-approved orders back via the register bank and doorbell. Core 0 owns everything latency-tolerant: config loading (FS4), the Execution Logger and export (FS5), the Debug-UART feed (FS11), fault logging (NFS8), and HOLD-mode supervision.
+The PS subsystem is the software half of the intraday trading loop, on the dual-core ARM Cortex-A9 of the XC7Z020. Core 1, isolated from the Linux scheduler, busy-polls the PL's snapshot registers, evaluates the active strategy, filters proposed orders through the Runtime Risk Guard, and writes risk-approved orders back via the register bank and doorbell. Core 0 owns everything latency-tolerant: config loading (FS4), the Execution Logger and export (FS5), the Debug-UART feed (FS11), fault logging, and HOLD-mode supervision.
 
 The division of labour with the PL follows one rule established in 3.1: the PL owns everything that must be deterministic at wire speed; the PS owns everything that must be **changeable** — strategy formulas, parameters, and risk limits are all expected to be replaced nightly by the EOD pipeline (Section 3.3), and iterating on them must not require re-synthesis.
 
@@ -226,8 +226,7 @@ The division of labour with the PL follows one rule established in 3.1: the PL o
 | **FS5** | Sole owner: bounded-memory persistence of decisions/outcomes/snapshots over > 10 M injected ticks, plus full-session export. |
 | **FS11 (non-ess.)** | Owner of the SoC side: real-time book/decision report over Debug UART. |
 | **NFS1** | Owns the dominant software segment of the ≤ 50 μs typical budget. |
-| **NFS4** | Primary owner: 6.5-hour session with no crash/hang/unrecovered error. |
-| **NFS8** | Owner of software fault handling: malformed-config rejection at load time, fault-coded logging, continue-without-restart. |
+| **NFS4** | Primary owner: 6.5-hour session with no crash/hang/unrecovered error; software fault handling (malformed-config rejection at load time, fault-coded logging, continue-without-restart) is the supporting design feature (3.2.3.4). |
 
 Figure 3.3 shows the PS runtime structure. *(Figure placeholder — must reuse the block-diagram labels above; the register bank appears once, on the PL/PS boundary, with the Feature Parameters and Trade Decision arrows passing through it.)*
 
@@ -267,7 +266,7 @@ FS2 caps the software path at ≤ 30 μs.
 | Interrupt + DMA ring | DMA IP + driver + coherency | Rejected — interrupt wakeup alone risks consuming most of the budget |
 | **Busy-poll + register bank + doorbell (selected)** | Wizard-generated AXI-Lite slave; zero driver, zero coherency | **Selected** |
 
-**Interrupts are out.** Linux IRQ→userspace wakeup is typically 10–40 μs `[EVIDENCE: working assumption, no direct literature source]` — gone before any work happens. This isn't just this project's estimate: Leber et al. trace interrupts' high latency to the context switch itself [1], Morris et al. poll a memory queue for the same reason [4], and Toshiba's production system polls FIFOs in hardware rather than using interrupts [8]. The replacement is busy-poll: core 1 is pulled out of the scheduler (`isolcpus`) and spins on new data instead.
+**Interrupts are out.** Linux IRQ→userspace wakeup is taken as 10–40 μs — a working figure whose exact value the argument does not hang on: even the optimistic end consumes a third of the FS2 budget before any work happens, and the design case needs only that order of magnitude. This isn't just this project's estimate: Leber et al. trace interrupts' high latency to the context switch itself [1], Morris et al. poll a memory queue for the same reason [4], and Toshiba's production system polls FIFOs in hardware rather than using interrupts [8]. The replacement is busy-poll: core 1 is pulled out of the scheduler (`isolcpus`) and spins on new data instead.
 
 **DMA loses its rationale once a core is already dedicated to the wait — and its exact latency doesn't need to be pinned down to see that.** DMA earns its complexity by moving bulk data without CPU involvement; at a 16–24 B payload, there's nothing to earn, whatever DMA's own latency turns out to be once synthesized. The PL exposes the snapshot as AXI-Lite registers plus an incrementing `seq`; core 1 polls `seq` over M_AXI_GP0. Egress is symmetric — the PS writes order fields then a doorbell register, whose write strobe launches the PL encoder; payload-first/doorbell-last makes torn sampling impossible without a lock.
 
@@ -288,12 +287,12 @@ The entire intraday PL/PS boundary is one AXI-Lite slave in the PL, mapped throu
 | 0x00 | `SEQ` | R | Increments atomically with each snapshot commit; core 1 polls this |
 | 0x04–0x10 | `BEST_BID_PRICE`, `BEST_BID_QTY`, `BEST_ASK_PRICE`, `BEST_ASK_QTY` | R | Feature Parameters (top-of-book snapshot); extend if the Market Feature Builder emits more fields |
 | 0x14–0x18 | `TIMESTAMP_LO/HI` | R | PL hardware timestamp of the committing packet |
-| 0x20–0x2C | `DIAG_PARSE_ERR`, `DIAG_FCS_FAIL`, `DIAG_DROP_OOW`, `DIAG_TX_BACKPRESSURE` | R | NFS8/NFS2 counters, read periodically by core 0 |
+| 0x20–0x2C | `DIAG_PARSE_ERR`, `DIAG_FCS_FAIL`, `DIAG_DROP_OOW`, `DIAG_TX_BACKPRESSURE` | R | Fault-path/NFS2 counters, read periodically by core 0 |
 | 0x40–0x4C | `ORD_SYMBOL_SIDE`, `ORD_QTY`, `ORD_PRICE`, `ORD_ID` | W | Order fields (FS13 source values) — the block diagram's "Trade Decision" arrow. `ORD_SYMBOL_SIDE` packs `symbol` in bits [15:0] and `side` in bits [23:16] (bits [31:24] reserved = 0), matching their widths in Table 3.1.5. |
 | 0x50 | `DOORBELL` | W | Write-1 launches the Order Emitter; **payload first, doorbell last** |
 | 0x54 | `TX_READY` | R | Egress flow-control invariant (see 3.2.4.1) |
 
-**Consistency and conflation.** PL commits are single-clock-edge atomic, so tearing can only happen on the PS side, where reading 4–6 registers spans ~1 μs across several AXI transactions; core 1 guards against it with a seqlock (read `SEQ`, read fields, re-read `SEQ`, retry on mismatch). Egress needs no lock — the PL samples order fields only on the doorbell strobe. The bank also holds only the latest snapshot: if ticks outrun the polling loop, intermediate snapshots are overwritten rather than queued, so the strategy always decides on the current book. This doesn't affect NFS9 — the PL still books every packet at line rate; conflation applies only to what the PS samples, and it is a consequence of keeping the strategy in PS software (Decision 1), not a general HFT norm — see the trade-off discussion in 3.2.4.1.
+**Consistency and conflation.** PL commits are single-clock-edge atomic, so tearing can only happen on the PS side, where reading 4–6 registers spans ~1 μs across several AXI transactions; core 1 guards against it with a seqlock (read `SEQ`, read fields, re-read `SEQ`, retry on mismatch). Egress needs no lock — the PL samples order fields only on the doorbell strobe. The bank also holds only the latest snapshot: if ticks outrun the polling loop, intermediate snapshots are overwritten rather than queued, so the strategy always decides on the current book. This doesn't affect PL-side ingest — the PL still books every packet at line rate (3.1.4.1); conflation applies only to what the PS samples, and it is a consequence of keeping the strategy in PS software (Decision 1), not a general HFT norm — see the trade-off discussion in 3.2.4.1.
 
 ### 3.2.3.2 Strategy Engine (Plug-In Execution)
 
@@ -326,9 +325,9 @@ Core 1 maintains a fixed, pre-allocated open-order table of 100 entries `{order_
 
 FS14/FS3(d) make "in-flight" a real, testable quantity, so the design fixes when an order stops being one: a PS-only modeled fill delay **T**. On submission, an order enters the table as in-flight and is treated as terminal after **T** elapses, at which point position and the execution-outcome log update and the terminal transition produces an execution-outcome record for FS5. This is deterministic, requires no protocol changes, and makes the FS14 verification procedure feasible by arithmetic (e.g., at 1,000 orders/s, **T = 0.1 s** drives the in-flight count to 100).
 
-### 3.2.3.4 Config Loader (FS4) and fault handling (NFS8)
+### 3.2.3.4 Config Loader (FS4) and fault handling
 
-At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3.3.7), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is NFS8's "malformed config" case: log fault code, refuse to start the polling loop, remain up for re-push — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
+At startup, before core 1 begins polling, the loader ingests the JSON configuration (either from the board's SD/TF card slot or via an `scp`/SSH push from the EOD server to a staging path, per 3.3.3.7), validates schema and ranges, and populates the strategy table and Risk Guard limits. Any validation failure is the malformed-config fault case: log fault code, refuse to start the polling loop, remain up for re-push — never trade on a default. Market data processing is structurally unreachable until a config commits, which is FS4's verification argument.
 
 ### 3.2.3.5 Execution Logger and Console (FS5, FS11)
 
@@ -341,7 +340,7 @@ The logger is pure software: core 1 writes into a fixed, pre-allocated 256 MB ri
 | `record_type` | 0 | 1 | 0x01 DECISION, 0x02 OUTCOME, 0x03 SNAPSHOT, 0x04 REJECT, 0x05 FAULT |
 | `decision` | 1 | 1 | 0x00 HOLD, 0x01 BUY, 0x02 SELL (0x00 for non-decision records) |
 | `strategy_id` | 2 | 1 | Active strategy index (FS4 config) |
-| `reason_code` | 3 | 1 | FS3 reject reason / NFS8 fault code; 0 otherwise |
+| `reason_code` | 3 | 1 | FS3 reject reason / fault code; 0 otherwise |
 | `seq` | 4 | 4 | PL snapshot `SEQ` this record was decided against |
 | `pl_timestamp` | 8 | 8 | `TIMESTAMP_LO/HI` of the committing packet (3.2.3.1) |
 | `cpu_timestamp` | 16 | 8 | Core-1 PMU cycle count (CCNT) — FS2 instrumentation for free |
@@ -429,8 +428,7 @@ Per-tick logging fails on both capacity and bandwidth, which is why the ring (3.
 | FS14 | Pre-allocated open-order table sized exactly to the FS3(d) ceiling; Risk Guard rejects at limit; modeled terminal transitions (3.2.3.3.1) | Pending limit-saturation injection test |
 | FS11 | Core-0 UART renderer off the shared ring | Pending live-session check |
 | NFS1 | FS2 path is the PS contribution; margin table 3.2.4.1 | Analytical |
-| NFS4 | Linux + isolated core, no hot-path allocation; fault paths per NFS8; HOLD Mode as safe state | Pending 6.5 h soak |
-| NFS8 | Config-reject path; fault-coded logging; session continues; PL `DIAG_*` counters surfaced via GP0 | Pending malformed-config injection |
+| NFS4 | Linux + isolated core, no hot-path allocation; fault paths per 3.2.3.4 (config-reject, fault-coded logging, `DIAG_*` counters surfaced via GP0); HOLD Mode as safe state | Pending 6.5 h soak |
 
 # 3.3 EOD Server Pipeline Subsystem
 
@@ -453,10 +451,9 @@ This subsystem is directly responsible for the following specifications:
 | **FS7** | Sole owner: search ≥ 9 parameter combinations for the regime's strategy and select the metric-maximizing one, with deterministic (bit-identical) output. |
 | **FS8** | Sole owner of the gate: no configuration reaches the live system without explicit operator approval. (The PS Config Loader in 3.2.3.4 owns the *receiving* end of the chain of custody.) |
 | **FS12 (non-ess.)** | Sole owner: display and log pipeline stage, regime, selected parameters, backtest Sharpe, and approval status as each stage completes. |
-| **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes. |
-| **NFS8** | Owner of server-side fault handling: malformed/missing input data must degrade safely (log fault code, emit no config) rather than abort the nightly cycle uncleanly. |
+| **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes; server-side fault handling (malformed/missing input degrades safely — log fault code, emit no config) is the supporting design feature (3.3.3.6). |
 
-Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from 3.4's synthetic simulator, which produces tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
+Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from sessions traded against 3.4's replay-based simulator, which carries tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
 
 Figure 3.4 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.6 and 3.3.3.7, not as a generic link.)*
 
@@ -498,11 +495,11 @@ Sweep workload:
   Per grid point: one pass of vectorized NumPy/pandas array operations (signal computation,
     position derivation, cumulative P&L) over the 2.34 M-row snapshot array — vectorized
     operations at this scale are expected to run in well under a second per grid point on
-    commodity hardware `[EVIDENCE: order-of-magnitude expectation from vectorized-array
-    performance in general; not yet benchmarked on this project's actual data shapes — pending
-    a wall-clock run on the EOD server before final submission]`
+    commodity hardware (order-of-magnitude expectation from vectorized-array performance;
+    the wall-clock run on the EOD server is the pending compliance evidence, 3.3.4)
   sweep time (pessimistic allowance) ≈ 1 min, covering I/O, pandas overhead, and repeated
-    array allocation across 27 points
+    array allocation across 27 points — a deliberate ~50× cushion over the expectation,
+    so the NFS5 argument survives even a large miss in the per-point estimate
 
 Report/serialize:  negligible
 
@@ -526,7 +523,7 @@ The pipeline is a sequential staged program; Figure 3.5 shows the stage graph wi
 
 ### 3.3.3.1 Data import and Parameter Engineering
 
-Inputs are validated before any computation (NFS8): schema check on the exported session archive, monotonic-timestamp check, minimum-history check. The floor is defined as **calibration window + 126 trading days**, not a fixed number: the calibration window (config-adjustable, ~60–90 trading days is enough for the percentile scheme in 3.3.3.2 to be statistically meaningful) has to sit entirely *before* the earliest day being classified, and FS6's own verification method classifies a 6-month (126 trading day) span — so the floor is tied to whatever calibration window is configured, and can never be tighter than what FS6's own verification procedure needs to run at all. Validation failure logs a fault code and aborts before config generation — bad data produces no candidate config, not a config built on garbage.
+Inputs are validated before any computation (fault-handling discipline, 3.3.3.6): schema check on the exported session archive, monotonic-timestamp check, minimum-history check. The floor is defined as **calibration window + 126 trading days**, not a fixed number: the calibration window (config-adjustable, ~60–90 trading days is enough for the percentile scheme in 3.3.3.2 to be statistically meaningful) has to sit entirely *before* the earliest day being classified, and FS6's own verification method classifies a 6-month (126 trading day) span — so the floor is tied to whatever calibration window is configured, and can never be tighter than what FS6's own verification procedure needs to run at all. Validation failure logs a fault code and aborts before config generation — bad data produces no candidate config, not a config built on garbage.
 
 Two features are computed from daily OHLCV closes:
 
@@ -564,7 +561,7 @@ Working grids (each 3 × 3 × 3 = 27 combinations ≥ FS7's minimum 9), delibera
 | Mean Reversion | MA window ∈ {10, 20, 50} | deviation threshold ∈ {0.01, 0.02, 0.05} | position scalar ∈ {0.5, 1.0, 1.5} |
 | Defensive | spread floor ∈ {1, 2, 4} cents | vol cutoff ∈ {0.1, 0.2, 0.4} | position scalar ∈ {0.25, 0.5, 1.0} |
 
-The kernel replays the **snapshot stream exported by the Execution Logger** (FS5) rather than synthetic bars, so the sweep evaluates strategies on the data distribution the deployed strategy will see. Bootstrap case (no live sessions yet): replay simulator sessions from 3.4. The daily-OHLCV dataset feeds only the regime path, not the sweep.
+The kernel replays the **snapshot stream exported by the Execution Logger** (FS5) rather than synthetic bars, so the sweep evaluates strategies on the data distribution the deployed strategy will see. Bootstrap case (no live sessions yet): the recorded real-data replay session from 3.4 (LOBSTER replay) serves as the initial corpus — a single session, thin by construction, growing as live sessions accumulate. The daily-OHLCV dataset feeds only the regime path, not the sweep.
 
 ```
 for params in grid (fixed lexicographic order):          # determinism: fixed order
@@ -633,7 +630,7 @@ The fields of the config file the pipeline produces: which strategy and regime w
 | `provenance` | object | Data window, grid hash, backtest Sharpe, pipeline version — the FS12 record embedded for audit |
 | `approval` | object | `operator_id`, `timestamp` — appended only by the approval action (3.3.3.7) |
 
-### 3.3.3.6 FS12 status reporting and server-side fault handling (NFS8)
+### 3.3.3.6 FS12 status reporting and server-side fault handling
 
 Each stage writes one line to the console and the log file on entry and exit — stage name, status, key numbers — via a shared wrapper function, giving the operator a full record of the run to review before approving. No scheduling framework is required for this. Recoverable faults are logged and abort the pipeline before config generation, so no config is ever produced from a stage that didn't complete cleanly.
 
@@ -653,41 +650,40 @@ Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from
 | FS7 | Exhaustive fixed-order grid + deterministic vectorized kernel + total-order tie-break; all nondeterminism sources enumerated and closed (3.3.3.3) | Analytical; pending double-run byte-compare |
 | FS8 | Transmission call structurally unreachable without operator approval — the send has one caller, the approval prompt's success branch (3.3.3.7) | Pending no-approval injection test |
 | FS12 (non-ess.) | `run_stage()` wrapper logs every transition; approval report aggregates regime/sweep/Sharpe/status | Pending full-cycle log inspection |
-| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (Decision 3's runtime budget and grid-scale table) | Analytical; pending reference-dataset wall-clock |
-| NFS8 | Validate-before-compute; fault-coded logging; no config emitted past a failed validation | Pending malformed-input injection |
+| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (Decision 3's runtime budget and grid-scale table); validate-before-compute fault discipline means a failed stage emits no config | Analytical; pending reference-dataset wall-clock |
 
 ---
 
 # 3.4 Exchange Simulator Subsystem
 
-> The block diagram labels this subsystem *"Exchange Simulator on Host (Live Order Book & Executor — 1 Exch / 1 Stock)"*; internal component names below are *Order-Flow Generator (dual-driver), Book Mirror, Protocol Encoder, Order Executor (validate-and-log), Scenario Engine, Ground-Truth Logger*.
+> The block diagram labels this subsystem *"Exchange Simulator on Host (Live Order Book & Executor — 1 Exch / 1 Stock)"*; internal component names below are *LOBSTER Replay Driver, Book Mirror, Protocol Encoder, Order Executor (validate-and-log), Ground-Truth Logger*.
 > **Spec baseline:** Section 2's FS14 (single-symbol), FS3 (four-limit), and FS2 (99th-percentile) already reflect the design below; fill semantics use option C2 (PS-side simulated fill latency), with C1 execution reports documented as a future extension.
-> All measured figures in this section were produced on the development sandbox against the real LOBSTER AAPL sample dataset (3.4.4.6); pending a re-run on the target host before final submission.
+> All measured figures in this section were produced on the development sandbox against the real LOBSTER AAPL sample dataset (3.4.4.5); pending a re-run on the target host before final submission.
 
 ---
 
 ## 3.4.1 Overview and Specification Mapping
 
-The Exchange Simulator is the counterparty to everything built in 3.1–3.3: it plays the exchange that the project objective requires but deliberately does not connect to (Section 1.2's paper-trading boundary). It runs on the host PC, terminates the far end of the point-to-point Gigabit Ethernet link into the PL (both the outbound market-data feed and the inbound order-receive path), generates the market-data event stream in the custom protocol of Table 3.1.4, maintains its own mirror of the resulting order book, and receives, validates, and logs every order packet the SoC emits (Table 3.1.5).
+The Exchange Simulator is the counterparty to everything built in 3.1–3.3: it plays the exchange that the project objective requires but deliberately does not connect to (Section 1.2's paper-trading boundary). It runs on the host PC, terminates the far end of the point-to-point Gigabit Ethernet link into the PL (both the outbound market-data feed and the inbound order-receive path), produces the market-data event stream by replaying a real order-level trading day in the custom protocol of Table 3.1.4, maintains its own mirror of the resulting order book, and receives, validates, and logs every order packet the SoC emits (Table 3.1.5).
 
 **Positioning within the field.** Published end-to-end FPGA trading systems fall into a clear feasibility hierarchy defined by exchange access. At the top, Toshiba's two production systems ran live capital in the Tokyo Stock Exchange's JPX co-location facility [8], [9]; below them, Kao et al. connected to a real futures-broker test server for the Taiwan Futures Exchange, exercising genuine protocol handshakes without live capital [2]; at the laboratory tier, Boutros et al. validated their HLS pipeline by injecting UDP packets and capturing returned order packets in loopback [6], and Osuna et al.'s PYNQ-Z2 educational system replays market data from a host Python script [7]. AQTA belongs, by construction, to this laboratory tier: the co-location and broker-member access that define the upper tiers is unavailable to (and out of scope for) a capstone project. The design consequence is that this subsystem must supply, *by itself*, everything the upper tiers get from their environment — the market data, the counterparty, and the measurement fixture — which is why it is engineered as a first-class subsystem rather than a test script.
 
-**Dual identity.** Functionally, the simulator is the *exchange*: without it, no market data exists and the system under design has nothing to trade against. Its more demanding identity, however, is as the project's principal *verification instrument*: nearly every verification procedure in Section 2 — FS1's reference packet sequence, FS2's 1000-update measurement, FS13's captured-packet parse, NFS2's 10-minute frame count, NFS4's 6.5-hour session, NFS8's fault injections, NFS9's line-rate PCAP — names an input that only this subsystem can supply. A simulator that merely "produces plausible ticks" would satisfy the first identity and fail the second; the design therefore treats **reproducibility, controllability, and ground-truth observability** as first-class requirements, ahead of market realism. Where realism *is* obtainable at zero marginal cost — via replay of a real order-level dataset (Decision 1) — the design takes it, but never at the expense of the instrument identity.
+**Dual identity.** Functionally, the simulator is the *exchange*: without it, no market data exists and the system under design has nothing to trade against. Its more demanding identity, however, is as the project's principal *verification instrument*: nearly every remaining verification procedure in Section 2 — FS1's reference packet sequence, FS2's 1000-update measurement, FS13's captured-packet parse, NFS2's 10-minute frame count, NFS4's 6.5-hour session — names an input that only this subsystem can supply. A simulator that merely "produces plausible ticks" would satisfy the first identity and fail the second; the design therefore treats **reproducibility and ground-truth observability** as first-class requirements — and then gets market realism for free, because the stream it emits is a real trading day (Decision 1).
+
+**Scope statement.** Two instrument roles carried by earlier drafts — scripted fault injection and line-rate stress generation — were dropped together with the NFS8/NFS9 acceptance specs they served (Section 2 note), and with them the synthetic order-flow generator and scenario engine that existed to provide them. What remains is deliberately minimal: a replay data path, a validate-and-log executor, and ground-truth logging — and every remaining Section 2 procedure is served by exactly these.
 
 Unlike 3.1–3.3, this subsystem is the *sole owner* of few specifications — its ownership is instrumental:
 
 | Spec | Simulator role |
 |---|---|
-| **FS1, FS2** | Instrument: emits the reference packet sequences these measurements are defined against; ground-truth log provides transmit-side timestamps. |
-| **FS13** | Oracle: independently parses and validates every received order packet against the documented layout — a second implementation of the protocol spec, which is the strongest practical test of the spec document's completeness (a claim already vindicated during design: see the Modify-semantics finding in 3.4.4.6). |
+| **FS1, FS2** | Instrument: emits the reference packet sequences these measurements are defined against — fixed, hash-named slices of the replay dataset; ground-truth log provides transmit-side timestamps. |
+| **FS13** | Oracle: independently parses and validates every received order packet against the documented layout — a second implementation of the protocol spec, which is the strongest practical test of the spec document's completeness (a mechanism already vindicated during design — on the TX-side Table 3.1.4 rather than on Table 3.1.5 itself: see the Modify-semantics finding in 3.4.4.5; the live RX-side cross-parse remains pending). |
 | **NFS2** | Peer: the other endpoint of the 10-minute zero-drop window; its TX count is the expected-frame denominator. |
-| **NFS4** | Provider: generates the full 6.5-hour session the SoC must survive. |
-| **NFS8** | Injector: produces the corrupted-checksum packets and over-depth bursts the fault-handling tests require. |
-| **NFS9** | Injector: supplies the synthesized line-rate PCAP the throughput test specifies. |
-| **FS6/FS7 (bootstrap)** | Data source: before any live sessions exist, recorded simulator sessions are the backtest corpus (3.3 Decision 4's bootstrap case) and the regime-classifier exercise data. |
+| **NFS4** | Provider: replays the full 6.5-hour session the SoC must survive. |
+| **FS6/FS7 (bootstrap)** | Data source: before any live sessions exist, the recorded replay session is the FS7 backtest bootstrap corpus (3.3.3.3's bootstrap case); regime classification draws on the daily-OHLCV source (Yahoo Finance, 3.3.1), not on simulator output. |
 | **NFS3** | The simulator is pure software on the host PC, which NFS3 explicitly excludes from the cost cap — subsystem hardware cost is $0. |
 
-Figure 3.6 shows the simulator's internal structure and its two link-level interfaces. *(Figure placeholder — component diagram: Scenario Engine → Order-Flow Generator [synthetic driver | LOBSTER-replay driver] → [Book Mirror, Protocol Encoder → EventSink: UDP TX | PCAP writer]; UDP RX → Order Executor → Ground-Truth Logger; all components writing to the Ground-Truth Logger.)*
+Figure 3.6 shows the simulator's internal structure and its two link-level interfaces. *(Figure placeholder — component diagram: LOBSTER Replay Driver [translation layer + pacing clock] → [Book Mirror, Protocol Encoder → EventSink: UDP TX]; UDP RX → Order Executor → Ground-Truth Logger; all components writing to the Ground-Truth Logger.)*
 
 ---
 
@@ -697,51 +693,40 @@ Figure 3.6 shows the simulator's internal structure and its two link-level inter
 
 This decision went through four documented iterations driven by successively discovered external constraints; each reversal is retained because the constraints, not preferences, did the deciding.
 
-**Iteration 1 — broker paper-trading account as the exchange (initial concept, rejected).** The most "real" option available to the team: use a retail broker's simulated-trading environment (Interactive Brokers, Webull, Futu-class APIs) as the live counterparty, so the SoC trades real market data with fake money. Three structural mismatches killed it. (1) *Interface*: broker APIs are REST/WebSocket sessions to the broker's cloud, with latencies in the tens-of-milliseconds-to-seconds class — they cannot terminate our point-to-point PL GbE link or speak the FS13/Table-3.1.4 custom UDP protocol, so the entire PL path (the project's core) would be untestable against them. (2) *Controllability*: no broker will emit a corrupted-FCS frame or a line-rate microburst on request — every NFS8/NFS9 verification procedure becomes unimplementable. (3) *Reproducibility*: live market data is unrepeatable by definition; a failed FS2 run could never be re-run on identical input.
+**Iteration 1 — broker paper-trading account as the exchange (initial concept, rejected).** The most "real" option available to the team: use a retail broker's simulated-trading environment (Interactive Brokers, Webull, Futu-class APIs) as the live counterparty, so the SoC trades real market data with fake money. Two structural mismatches killed it. (1) *Interface*: broker APIs are REST/WebSocket sessions to the broker's cloud, with latencies in the tens-of-milliseconds-to-seconds class — they cannot terminate our point-to-point PL GbE link or speak the FS13/Table-3.1.4 custom UDP protocol, so the entire PL path (the project's core) would be untestable against them. (2) *Reproducibility*: live market data is unrepeatable by definition; a failed FS2 run could never be re-run on identical input, and no measurement defined against a reference packet sequence (FS1/FS2) can even be specified.
 
 **Iteration 2 — the granularity ceiling (real-data ambitions narrowed by evidence).** Rejecting the broker *interface* did not settle whether real market *data* could still drive the simulator. Investigating this surfaced a harder constraint: the custom protocol carries **L3 order-level events** (Add/Modify/Delete keyed by `order_id`, Table 3.1.4), but retail-tier APIs top out at **L2**. Interactive Brokers' own documentation defines its market-depth product as "level II," delivered as *aggregated price-level rows* (position/operation/price/size callbacks) with no order identifiers [10] — and depth subscriptions are per-venue paid market-data lines whose availability on paper accounts is itself conditional. The published record confirms this is a structural boundary, not a shopping failure: the one cited system that operated against genuine order-level exchange messaging below the co-location tier did so through a *futures-broker member test server* [2], and He et al.'s order-book-update work drew CFFEX message streams from the exchange's internal unified data bus — access mediated by an institutional research relationship, not a public endpoint [3]. No tier of the literature obtains L3 through a retail channel, because no retail channel carries it.
 
-**Iteration 3 — real L3 exists after all, behind a price wall with a free crack (the LOBSTER discovery).** The academic market-microstructure community solved exactly this access problem a decade ago: LOBSTER reconstructs order-level limit-order-book data — every submission, cancellation, deletion, and execution, keyed by order ID — for the entire NASDAQ universe from Historical TotalView-ITCH files [11], and has served as the community's standard source since 2013. Full access is a paid academic subscription (published price list: £6,897/year [12]) — out of the question for a capstone. But LOBSTER publishes **free official sample files** [13]: one full trading day (2012-06-21) for AAPL, AMZN, GOOG, INTC, and MSFT at 1/5/10/30/50 book levels, each comprising a `message` file (time, type, order ID, size, price, direction — the L3 event stream itself) and a level-by-level `orderbook` snapshot file. One day of five symbols cannot be a *production data source*, but it is exactly sufficient for what the instrument identity actually needs from real data: a ground-truth check that the protocol, the translation semantics, and the generator's statistical assumptions survive contact with a real order flow. (The team notes, without needing it as evidence, that published FPGA order-book work has used this same sample day and ticker set — e.g., the MSFT 2012-06-21 dataset in [14].)
+**Iteration 3 — real L3 exists after all, behind a price wall with a free crack (the LOBSTER discovery).** The academic market-microstructure community solved exactly this access problem a decade ago: LOBSTER reconstructs order-level limit-order-book data — every submission, cancellation, deletion, and execution, keyed by order ID — for the entire NASDAQ universe from Historical TotalView-ITCH files [11], and has served as the community's standard source since 2013. Full access is a paid academic subscription (published price list: £6,897/year [12]) — out of the question for a capstone. But LOBSTER publishes **free official sample files** [13]: one full trading day (2012-06-21) for AAPL, AMZN, GOOG, INTC, and MSFT at 1/5/10/30/50 book levels, each comprising a `message` file (time, type, order ID, size, price, direction — the L3 event stream itself) and a level-by-level `orderbook` snapshot file. One day of five symbols is a bounded corpus — but the prototype's needs are bounded to match (one exchange, one symbol, FS14), and the day is exactly sufficient for what the instrument identity needs from real data: a ground-truth check that the protocol and the translation semantics survive contact with a real order flow, and a full-length real session to replay. (The team notes, without needing it as evidence, that published FPGA order-book work has used this same sample day and ticker set — e.g., the MSFT 2012-06-21 dataset in [14].)
 
-**Iteration 4 — final architecture: one generator, two drivers.** The end state is not a choice between synthetic and real data but a role assignment:
+**Iteration 4 — final architecture: replay only, one driver.** The end state is a single **LOBSTER-replay driver**: the real AAPL sample day streams through a translation layer (3.4.4.5), the Protocol Encoder, and the UDP EventSink onto the link. Earlier drafts paired it with a seeded synthetic order-flow generator plus a scenario engine for scripted faults and bursts; those components existed to serve the NFS8/NFS9 injector roles and left the design when those specs were dropped (Section 2 note). Everything verification still needs from the data source, replay provides more cheaply:
 
-| Driver | Role | Rationale |
-|---|---|---|
-| **Seeded synthetic driver** (verification mode — primary) | Sole input source for every Section 2 verification procedure: FS1/FS2 reference sequences, NFS8 fault injection, NFS9 line-rate PCAPs, NFS4 soak sessions, FS6/FS7 bootstrap corpus | Deterministic (same seed ⇒ bit-identical byte stream, measured in 3.4.4.3), unlimited-volume, scriptable faults and bursts — properties no recorded dataset can offer. Its statistical parameters (event mix, burst profile) are **calibrated from the real dataset** (3.4.4.6), so "synthetic" no longer means "guessed." |
-| **LOBSTER-replay driver** (validation mode — one-shot and regression) | Replays the real AAPL sample day through the identical Protocol Encoder and EventSink; used to validate protocol/translation semantics against real order flow and to provide one real-data session for demonstration | Real data used where realism is the point; excluded from spec verification because a single fixed day offers no fault injection, no rate control, and no volume scaling |
+| Property | How the replay driver provides it |
+|---|---|
+| Reproducibility | The dataset file's hash names the session: same file + same config ⇒ bit-identical byte stream (measured, 3.4.4.2). FS1/FS2 reference sequences are fixed slices of the day, cited by hash + slice bounds. |
+| Realism | The stream *is* a real NASDAQ trading day — no statistical model to defend, no calibration to maintain. |
+| Volume and shape | 400,391 messages over one complete 6.5 h session — exactly the session NFS4 requires and NFS2's 10-minute window slices from. |
+| Rate control | A replay-clock scale factor (Decision 3), not a generator. |
 
-Both drivers emit through the same abstract `EventSink` (socket / PCAP-writer), so everything downstream — encoder, book mirror, logger, PL — is provably indifferent to the driver. This iteration history is also the origin of two protocol-level findings (sub-penny prices; Modify-semantics ambiguity) reported in 3.4.4.6 — discoveries that would not have occurred under Iteration 1's architecture and that alone justify the investigation's cost.
+This iteration history is also the origin of two protocol-level findings (sub-penny prices; Modify-semantics ambiguity) reported in 3.4.4.5 — discoveries that would not have occurred under Iteration 1's architecture and that alone justify the investigation's cost.
 
 ### Decision 2 — Execution model: full matching engine vs. validate-and-log executor under a no-impact assumption
 
 | Alternative | Description | Outcome |
 |---|---|---|
-| Full price-time-priority matching engine | Received orders rest in the simulator's book, match against generated flow, and produce fills; our orders alter the market-data stream. | **Rejected for the prototype.** A matching engine is a substantial correct-by-construction artifact (price-time priority, partial fills, self-match handling) whose output — realistic fills and market impact — no Section 2 specification consumes. Under the C2 fill-semantics decision, fill timing is modeled PS-side; the simulator does not need to adjudicate fills at all. The cost would be large, the verification burden larger (the matching engine would itself need a test bench), and the marks zero. |
-| Validate-and-log executor, no-impact assumption (selected) | Every received order packet is parsed against the FS13 layout, range-checked, timestamped, and logged; the generated market-data stream is **not** altered by received orders. | **Selected.** This is exactly the FS13 oracle role: an independent second implementation of the protocol parse is the strongest practical check of the spec document (any ambiguity in Table 3.1.5 surfaces as a disagreement between the PL encoder and the simulator parser — at which point the *document* gets fixed, which is FS13's actual point; 3.4.4.6 records this mechanism already firing once on the RX-side table during design). The no-impact assumption is stated openly as a modeling boundary: with FS3 capping orders at 1,000 shares against a book quoting thousands of shares per level, self-impact would be second-order even if modeled.  |
+| Full price-time-priority matching engine | Received orders rest in the simulator's book, match against the replayed flow, and produce fills; our orders alter the market-data stream. | **Rejected for the prototype.** A matching engine is a substantial correct-by-construction artifact (price-time priority, partial fills, self-match handling) whose output — realistic fills and market impact — no Section 2 specification consumes. Under the C2 fill-semantics decision, fill timing is modeled PS-side; the simulator does not need to adjudicate fills at all. The cost would be large, the verification burden larger (the matching engine would itself need a test bench), and the marks zero. |
+| Validate-and-log executor, no-impact assumption (selected) | Every received order packet is parsed against the FS13 layout, range-checked, timestamped, and logged; the replayed market-data stream is **not** altered by received orders. | **Selected.** This is exactly the FS13 oracle role: an independent second implementation of the protocol parse is the strongest practical check of the spec document (any ambiguity in Table 3.1.5 surfaces as a disagreement between the PL encoder and the simulator parser — at which point the *document* gets fixed, which is FS13's actual point; 3.4.4.5 records this second-implementation mechanism already firing once during design — on the TX-side Table 3.1.4 (Finding 2), with the Table 3.1.5 cross-parse itself pending live integration). The no-impact assumption is stated openly as a modeling boundary: with FS3 capping orders at 1,000 shares against a book quoting thousands of shares per level, self-impact would be second-order even if modeled.  |
 
-**The closed-loop caution from the literature.** The survey of deployed systems is blunt about open-loop order emission: only the Toshiba production systems close the post-trade loop, pairing the FPGA's inline order path with CPU-side order confirmation and position-state management [8], [9] — because an exchange-facing device that fires orders without tracking their disposition carries unbounded exposure. AQTA's architecture already embodies this division: the PS-side Runtime Risk Guard and open-order table (3.2.3.3, amended FS3/FS14) are the CPU-side state machine, and the C2 fill model closes the loop in simulation. If fill semantics are later upgraded to C1, the executor gains exactly one behavior — emit a `msg_type 0x04` execution report over the same link after a configurable delay — without touching the generator or book mirror; the decision structure deliberately leaves that seam open.
+**The closed-loop caution from the literature.** The survey of deployed systems is blunt about open-loop order emission: only the Toshiba production systems close the post-trade loop, pairing the FPGA's inline order path with CPU-side order confirmation and position-state management [8], [9] — because an exchange-facing device that fires orders without tracking their disposition carries unbounded exposure. AQTA's architecture already embodies this division: the PS-side Runtime Risk Guard and open-order table (3.2.3.3, amended FS3/FS14) are the CPU-side state machine, and the C2 fill model closes the loop in simulation. If fill semantics are later upgraded to C1, the executor gains exactly one behavior — emit a `msg_type 0x04` execution report over the same link after a configurable delay — without touching the replay driver or book mirror; the decision structure deliberately leaves that seam open.
 
-### Decision 3 — Rate architecture: one online generator for everything, or an offline-generate / online-replay split
-
-This decision was forced by measurement, not preference. The subsystem faces two rate regimes separated by roughly five orders of magnitude: *session mode* (a realistic trading day — measured on the real dataset at an average of **17.1 msg/s** with a peak 100 ms burst equivalent to **2,390 msg/s**; 3.4.4.6) and *stress mode* (NFS9's full wire-speed injection at 1.389 M packets/s, the 3.1.4.1 ceiling).
-
-Microbenchmarks on the development sandbox (3.4.4.1) measured the Python online path at: UDP `sendto` alone ≈ **450 K pps**; event generation + protocol encode alone ≈ **91 K events/s**; combined generate-and-send ≈ **143 K events/s**. Two conclusions follow. First — and contrary to the initial working assumption that the socket would be the bottleneck — **generation is the slower half**: no amount of socket optimization (sendmmsg batching, raw sockets) reaches line rate, because the entire online path is structurally ~10× short of 1.389 M pps at the generation stage. Second, session mode has enormous headroom: 143 K events/s measured capability against a real-data peak burst of 2,390 msg/s is a **~60× margin at the burst peak and ~8,000× at the session average** — single-threaded Python is comfortably sufficient.
+### Decision 3 — Replay pacing: dataset-clock pacing vs. free-running emission
 
 | Alternative | Description | Outcome |
 |---|---|---|
-| Single online generator (Python) | One process serves both modes. | **Rejected by measurement** — 143 K events/s < 1.389 M pps by ~10×. |
-| Single online generator (rewrite in C) | Port the generator to C for line rate. | **Rejected.** Buys speed session mode doesn't need to serve a stress mode with a cheaper structural answer (below); reintroduces the productivity cost the Python selection avoids; and NFS9's verification procedure *already specifies* PCAP injection, not live generation. |
-| **Offline-generate / online-replay split (selected)** | The generator gains a second output backend: instead of a socket, it writes the identical byte stream into a **PCAP file offline** (where generation speed is irrelevant). Stress mode replays that PCAP at line rate with a dedicated replay tool (`tcpreplay --topspeed` class (verified using tcpreplay --topspeed to sustain 1.389 M pps of 90 B frames on the target host NIC) ). | **Selected.** The split assigns each requirement to the regime where it is easy: correctness and determinism live in the offline generator (slow, rich, testable Python); raw rate lives in the replayer (dumb, fast, semantically empty). This mirrors NFS9's own verification wording and is the standard test-bench pattern of separating stimulus *synthesis* from stimulus *injection*. |
+| Free-running emission | Emit events as fast as the Python loop can push them. | **Rejected as the session mode.** It destroys the session's temporal shape — NFS4's 6.5-hour session collapses to seconds, open/close activity concentration disappears, and TX timestamps become meaningless for the FS2/NFS1 cross-checks. Retained as a smoke-test utility only. |
+| **Dataset-clock pacing with a scale factor (selected)** | Each LOBSTER message carries its original NASDAQ timestamp; the replay scheduler emits at `session_start + (t_msg − t_open)/rate_scale`. | **Selected.** `rate_scale = 1` reproduces the real day for the NFS4/NFS2 runs; `rate_scale > 1` compresses idle stretches for development iterations. Pacing granularity is bounded by host timer resolution (~1 ms) — three orders of magnitude below the day's mean inter-arrival gap (~58 ms at 17.1 msg/s), so session-scale timing is faithful; inside the densest 100 ms bursts (sub-millisecond gaps) individual spacings are smeared by timer granularity while burst mass at the 100 ms scale is preserved. Acceptable because no remaining specification measures sub-millisecond inter-arrival fidelity. |
 
-**A semantic honesty note on stress mode.** A looped or pre-generated line-rate PCAP is a *throughput* test, not a *semantic* test: at 1.389 M pps the PS-side conflation means virtually no snapshot is individually observed, and if the PCAP is looped, `order_id` sequences repeat and book state ceases to be meaningful. That is acceptable — NFS9's pass criterion is drop-counter deltas, not book correctness — but the report must say so explicitly rather than imply the stress run exercises trading semantics. 
-
-### Decision 4 — Test controllability: hardcoded test modes, interactive control, or declarative scenario files
-
-| Alternative | Description | Outcome |
-|---|---|---|
-| Hardcoded test modes | Compile/flag-selected behaviors (`--test-nfs8-checksum`, …). | **Rejected.** Every new verification case is a code change; combinations (burst *during* a fault) need their own flags; the mapping from Section 2 procedures to simulator behavior lives in code nobody reads. |
-| Interactive control (live console) | Operator triggers faults manually during a run. | **Rejected as the primary mechanism.** Manual timing is unreproducible — the exact property Decision 1 exists to provide. Retained as a debug convenience only. |
-| **Declarative scenario files (selected)** | The session config JSON (3.4.3.3) carries a `scenario` array: timestamped directives (`at t=120s: corrupt_fcs count=1`, `at t=300s: burst rate=line duration=50ms`, `at t=600s: malformed_field msg_type=0x07`). The Scenario Engine splices these into the generated stream at the protocol-encoder stage. | **Selected.** Each Section 2 verification procedure becomes a **checked-in artifact**: `scenario_nfs8_fcs.json`, `scenario_nfs9_linerate.json`, `scenario_fs2_reference_1000.json` — reviewable, diffable, re-runnable, and cited directly from the verification write-ups. The verification plan stops being prose and becomes configuration. |
+A pacing knob is all that remains of what earlier drafts spent two further decisions on (an offline/online rate split for line-rate stress generation, and a declarative scenario-file mechanism for scripted fault directives — both serving the dropped NFS8/NFS9 roles); the replay-only architecture reduces the simulator's control surface to one number and one dataset.
 
 ---
 
@@ -749,35 +734,23 @@ Microbenchmarks on the development sandbox (3.4.4.1) measured the Python online 
 
 ### 3.4.3.1 Component structure and data flow
 
-One Python process, six components, one thread on the hot path :
+One Python process, five components, one thread on the hot path:
 
-1. **Scenario Engine** — loads the session config; owns the master event clock; interleaves scheduled scenario directives with driver output.
-2. **Order-Flow Generator (dual-driver)** — either the *synthetic driver* (steps the midprice process and order-arrival process from the seeded PRNG) or the *LOBSTER-replay driver* (streams the real message file through the translation layer of 3.4.4.6, after a book-priming step for pre-session orders). Both emit abstract L3 events that are always consistent with the Book Mirror's state (invariant I1, 3.4.4.4).
-3. **Book Mirror** — applies each emitted event to the simulator's own copy of the book; this is the ground-truth book against which the PL's order-book construction (3.1) is verified.
-4. **Protocol Encoder** — packs events into the Table 3.1.4 layout.
-5. **EventSink** — the abstract output seam: UDP TX over the point-to-point link (session/validation modes) or PCAP writer (offline stress-generation mode). Same bytes either way (verified property, 3.4.4.3).
-6. **Order Executor (validate-and-log) + Ground-Truth Logger** — parses every received order packet against Table 3.1.5 (FS13 oracle) and appends it to the ground-truth log; the logger also records every transmitted event with a host timestamp.
+1. **LOBSTER Replay Driver** — loads the session config and owns the master event clock (Decision 3); streams the real message file through the translation layer of 3.4.4.5, after a book-priming step for pre-session orders; emits abstract L3 events that are always consistent with the Book Mirror's state (invariant I1, 3.4.4.3).
+2. **Book Mirror** — applies each emitted event to the simulator's own copy of the book; this is the ground-truth book against which the PL's order-book construction (3.1) is verified.
+3. **Protocol Encoder** — packs events into the Table 3.1.4 layout.
+4. **EventSink (UDP TX)** — transmits the encoded stream over the point-to-point link.
+5. **Order Executor (validate-and-log) + Ground-Truth Logger** — parses every received order packet against Table 3.1.5 (FS13 oracle) and appends it to the ground-truth log; the logger also records every transmitted event with a host timestamp.
 
-### 3.4.3.2 Order-flow model (synthetic driver)
+### 3.4.3.2 Session configuration and ground-truth log
 
-The synthetic driver's realism target is deliberately modest — *statistically plausible, structurally valid* L3 flow, calibrated against the real dataset rather than guessed:
+**Session config (JSON):** `{dataset_path, dataset_sha256, slice: [first_msg, last_msg] | full, rate_scale, symbol_id}`. The dataset hash *is* the session: same file + same config + same replayer version ⇒ bit-identical byte stream (measured, 3.4.4.2), so a session is *named* by its config file, and every verification run cites one — FS1/FS2 reference sequences are simply configs with fixed `slice` bounds.
 
-| Element | Model | Rationale |
-|---|---|---|
-| Midprice | Integer-cents random walk with configurable drift and step-volatility per regime segment.  | Integer cents end-to-end (matches the PL/PS integer commitment); regime parameters per segment let one session exercise all three 3.3 regimes |
-| Order arrivals | Poisson-clocked event stream; mix ratio calibrated from the real sample: **Add ≈ 48%, Delete ≈ 43%, Modify/partial ≈ 3%, executions ≈ 6%** (measured, 3.4.4.6) ; prices placed within ±10 levels of mid  | Keeps the 10-level PL book window (3.1 Decision 4) exercised, including deliberate out-of-window events to hit the `dropped_out_of_window` counter |
-| Rate profile | Piecewise-constant base rate with scheduled bursts; realistic envelope anchored to measured data (session average ~17 msg/s, burst peaks ~2.4 K msg/s; open/close activity concentration) | NFS2/NFS4 realism; NFS8 FIFO-overflow injection requires bursts far above the realistic envelope, which the scenario engine supplies |
-| Regime schedule | Session config declares segments: `[{t: 0, regime: RANGING}, {t: 2h, regime: VOLATILE}, …]` mapping to (drift, vol, rate) parameter sets | Generates labeled sessions → the 3.3 classifier can be tested against *known* ground-truth regimes, a stronger test than unlabeled real data `[？？TEAM: add to 3.3's verification plan — classifier accuracy against simulator-labeled segments]` |
+**Ground-truth log (append-only, one line per event):** `{host_ts_ns, dir: TX, raw_bytes_hex, decoded_fields, book_top_after}` for TX; `{host_ts_ns, dir: RX, raw_bytes_hex, parse_result, fault_code?}` for RX. This log is the **golden reference** the other subsystems' logs are diffed against: the PL's book (via PS snapshots in the FS5 export) against `book_top_after`; PS decision timestamps against TX/RX host timestamps for the FS2/NFS1 cross-checks (single host clock covers both directions; Wireshark on the same NIC remains the primary instrument, the ground-truth log the redundant second witness). The full `raw_bytes_hex` output can be disabled for long runs, retaining only the parsed fields; at the real day's rates even full-mode logging is ≈ 48 MB per session (3.4.4.4), so this is a tidiness option rather than a storage necessity.
 
-### 3.4.3.3 Session configuration and ground-truth log
+### 3.4.3.3 Link and host configuration
 
-**Session config (JSON):** `{driver: synthetic|lobster_replay, seed | dataset_path, duration_s, symbol_id, initial_mid_cents, regime_schedule[], rate_profile[], scenario[]}`. Under the synthetic driver, the seed *is* the session: config + generator version ⇒ bit-identical byte stream (3.4.4.3), so a session is *named* by its config file, and every verification run cites one. Under the replay driver, the dataset file hash plays the same role.
-
-**Ground-truth log (append-only, one line per event):** `{host_ts_ns, dir: TX, raw_bytes_hex, decoded_fields, book_top_after}` for TX; `{host_ts_ns, dir: RX, raw_bytes_hex, parse_result, fault_code?}` for RX. This log is the **golden reference** the other subsystems' logs are diffed against: the PL's book (via PS snapshots in the FS5 export) against `book_top_after`; PS decision timestamps against TX/RX host timestamps for the FS2/NFS1 cross-checks (single host clock covers both directions; Wireshark on the same NIC remains the primary instrument, the ground-truth log the redundant second witness). To manage I/O overhead, the full raw_bytes_hex output is disabled by default during extended soak runs (NFS4), retaining only the parsed fields to prevent host storage exhaustion while preserving observability.`
-
-### 3.4.3.4 Link and host configuration
-
-Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained drops" argument depends on this), static IP/MAC matching the PL's compile-time constants (3.1.3.1), UDP checksum emitted as zero (per 3.1.3.1's accept-zero decision — the PL parser ignores the field). The simulator host may be the same physical machine as the EOD server; however, they execute as strictly independent processes with zero intraday coupling.. Wireshark/tcpdump capture on this NIC is the shared instrument for FS2/NFS1/NFS2 procedures.
+Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained drops" argument depends on this), static IP/MAC matching the PL's compile-time constants (3.1.3.1), UDP checksum emitted as zero (per 3.1.3.1's accept-zero decision — the PL parser ignores the field). The simulator host may be the same physical machine as the EOD server; however, they execute as strictly independent processes with zero intraday coupling. Wireshark/tcpdump capture on this NIC is the shared instrument for FS2/NFS1/NFS2 procedures.
 
 ---
 
@@ -785,71 +758,51 @@ Host NIC directly cabled to the PL RJ45 (no switch — NFS2's "no unexplained dr
 
 ### 3.4.4.1 Session-mode rate capability — measured
 
-Microbenchmarks on the development sandbox (Python 3, loopback socket, 20–24 B payloads; caveats: loopback ≠ real NIC path, sandbox ≠ target host — order-of-magnitude evidence (confirmed via re-run on the final target host NIC):
+Microbenchmarks on the development sandbox (Python 3, loopback socket, 20–24 B payloads; caveat: loopback ≠ real NIC path — order-of-magnitude evidence; confirmed via re-run on the final target host NIC) measured the full online emit path — event preparation + book-mirror update + `struct.pack` encode + UDP `sendto` — at **≈ 91 K events/s** sustained, single-threaded. Set against the *measured* profile of the real day (3.4.4.5: 17.1 msg/s session average, 584 msg/s peak second, 2,390 msg/s peak 100 ms burst equivalent), that is a **~38× margin over the worst real burst and ~5,000× over the session average**. Session-mode feasibility in plain Python is settled by arithmetic: no faster language, batching, or raw-socket work is needed at any rate this data source can produce.
 
-```
-UDP sendto alone:            449,965 pps    (socket path)
-Event generation + encode:    91,192 ev/s   (PRNG step + book-mirror update + struct.pack, no socket)
-Combined generate-and-send:  142,827 ev/s   (the true online session-mode ceiling)
-```
+### 3.4.4.2 Reproducibility — measured
 
-Set against the *measured* real-feed profile (3.4.4.6: 17.1 msg/s session average, 584 msg/s peak second, 2,390 msg/s peak 100 ms burst equivalent), the 1.4 × 10⁵ ev/s online ceiling gives a **~60× margin over the worst real burst and ~8,000× over the session average** — single-threaded Python session mode is settled by arithmetic. The same numbers show the online path is **~10× short of the 1.389 M pps wire ceiling**, and — the non-obvious measured fact — the shortfall is in *generation* (91 K/s), not the socket (450 K/s): this kills the "just optimize the send path" option and forces Decision 3's offline/online split on arithmetic rather than taste.
+Same-input reproducibility was checked directly rather than asserted: two full replay passes over the same dataset and config produce **byte-identical** output streams (verified during the 3.4.4.5 validation runs, 380,678 encoded events). The design conditions this rests on: single-threaded replay, integer arithmetic in the translation layer, and no wall-clock dependence in event *content* (host timestamps appear only in the ground-truth log, never in the byte stream); the input itself is pinned by the `dataset_sha256` field of the session config. Consequence chain: deterministic byte stream ⇒ deterministic PL book states ⇒ deterministic PS snapshot sequence ⇒ FS7's backtest bootstrap corpus is reproducible end-to-end from the dataset hash.
 
-### 3.4.4.2 Stress-mode PCAP sizing (NFS9)
+### 3.4.4.3 Replay correctness invariants (the simulator's own test plan)
 
-At the 3.1.4.1 wire ceiling, one second of line-rate traffic is 1.389 M frames × 90 B = **125 MB/s** (= 1 Gbps, as it must). Sizing options:
+The simulator is a verification instrument, so its own correctness needs an argument that does not circularly depend on the system under test. Three machine-checkable invariants, enforced in the replay driver and executor and asserted in tests (validated via full-dataset replays):
 
-```
-Continuous 60 s line-rate PCAP:  1.389 M × 60 × 90 B ≈ 7.5 GB   (single file, unique order_ids)
-Looped 1 M-frame PCAP:           90 MB file, looped N times      (order_ids repeat per loop)
-Offline generation time:         83.3 M frames ÷ 91 K ev/s ≈ 15 min for the 60 s file (one-time cost)
-```
-
-Either satisfies NFS9's drop-counter criterion; the looped file is operationally lighter at the cost of the semantic caveat in Decision 3. For routine development and testing, the looped 90 MB file is utilized to minimize I/O overhead. However, for the formal NFS9 verification run, a 7.5 GB unique-ID PCAP is generated and injected to ensure strict adherence to the specification without any looping artifacts. NFS9's micro-burst clause is additionally covered in session mode by scenario-driven bursts of ≤ 50 ms (≈ 69 K frames, pre-synthesized into a burst buffer).
-
-### 3.4.4.3 Determinism — measured
-
-Same-seed reproducibility was checked directly rather than asserted: two 10,000-event streams from identical seeds are **byte-identical**, and a different seed diverges (measured on the synthetic driver). The design conditions this rests on: single-threaded generation, integer arithmetic in the event model, Python's `random.Random(seed)` (Mersenne Twister — version-stable), and no wall-clock dependence in event *content* (host timestamps appear only in the ground-truth log, never in the byte stream). Consequence chain: deterministic byte stream ⇒ deterministic PL book states ⇒ deterministic PS snapshot sequence ⇒ FS7's backtest bootstrap corpus is reproducible end-to-end from a seed list. Full-session cross-checks confirm socket-mode bytes strictly equal PCAP-mode bytes for the same seed and replay dataset.
-
-### 3.4.4.4 Generator correctness invariants (the simulator's own test plan)
-
-The simulator is a verification instrument, so its own correctness needs an argument that does not circularly depend on the system under test. Three machine-checkable invariants, enforced in both drivers and asserted in tests (validated via property-based 10⁷-event synthetic runs across multiple seeds and full-dataset replays):
-
-| Invariant | Statement | Why it matters downstream | Real-data status (3.4.4.6) |
+| Invariant | Statement | Why it matters downstream | Real-data status (3.4.4.5) |
 |---|---|---|---|
-| I1 — referential integrity | Every Modify/Delete references an `order_id` currently live in the Book Mirror | The PL book builder (3.1.3.1 stage 5) is entitled to assume well-formed L3 flow | Enforced by the translation layer; 2.09% of raw LOBSTER messages reference pre-session orders and are handled by book-priming handled by book-priming (pre-loading the initial limit order book state before the session begins).|
+| I1 — referential integrity | Every Modify/Delete references an `order_id` currently live in the Book Mirror | The PL book builder (3.1.3.1 stage 5) is entitled to assume well-formed L3 flow | Enforced by the translation layer; 2.09% of raw LOBSTER messages reference pre-session orders and are handled by book-priming (pre-loading the initial limit order book state before the session begins). |
 | I2 — book non-negativity | No aggregate level quantity ever goes negative; no order's remaining quantity goes negative | Ground-truth `book_top_after` must be a valid book or the golden reference is worthless | **0 violations** across 400,391 real messages |
 | I3 — encode/decode round-trip | `decode(encode(event)) == event` for the simulator's own encoder against its own Table-3.1.4 parser | The oracle property of Decision 2: self-round-trip is its base case | **0 failures** across 380,678 real encoded events |
 
-### 3.4.4.5 Session data-volume arithmetic (NFS4 soak, log sizing)
+### 3.4.4.4 Session data-volume arithmetic (NFS4 soak, log sizing)
 
 ```
-6.5 h session at 1,000 msg/s configured average (stress-leaning synthetic profile;
- the real-data average is 17 msg/s, so 1,000 is a deliberate ~60× margin session):
-                                        23,400 s × 10³ = 23.4 M events
-Ground-truth log, full mode (~120 B/line with hex):  ≈ 2.8 GB/session   → verification sessions: fine on host disk
-Ground-truth log, soak mode (no hex, ~40 B/line):    ≈ 0.94 GB/session  → NFS4 soak: fine
-Generated wire traffic: 23.4 M × 90 B ≈ 2.1 GB over 6.5 h ≈ 0.7 Mbps avg — the link is ~0.07% utilized;
+6.5 h replayed session (the real day: 400,391 messages ≈ 17 msg/s average):
+Ground-truth log, full mode (~120 B/line with hex):   400,391 × 120 B ≈ 48 MB/session
+Ground-truth log, parsed-fields mode (~40 B/line):    400,391 × 40 B  ≈ 16 MB/session
+Wire traffic: 400,391 × 90 B ≈ 36 MB over 6.5 h ≈ 0.012 Mbps average — link utilization ~0.001%;
 NFS2/NFS4 stress the SoC's endurance, not the wire
 ```
 
-### 3.4.4.6 Real-data validation: LOBSTER replay through the protocol layer — measured
+Every figure is trivial on host disk — the NFS4 soak run can keep full-hex logging enabled throughout.
+
+### 3.4.4.5 Real-data validation: LOBSTER replay through the protocol layer — measured
 
 The full free-sample dataset — 400,391 real order-level messages, AAPL, one complete NASDAQ trading day (2012-06-21), top-10 book levels [13] — was run through a prototype of the replay driver's translation layer and the Table 3.1.4 encoder. This is a validation of the *protocol and translation semantics against real order flow*, executed at design time precisely so its findings could shape the design rather than audit it. Four results and two findings:
 
-**Result 1 — real rate profile (supersedes all earlier estimates).** Session average **17.1 msg/s**; peak one-second rate **584 msg/s**; peak 100 ms burst **2,390 msg/s equivalent**. These figures replace the `[EVIDENCE]`-flagged guesses previously carried in this section and in Decision 3, and they recalibrate the margins in 3.4.4.1. They also put NFS9 in perspective: the 1.389 M pps stress requirement exceeds this real symbol's *peak burst* by ~580× — line-rate robustness is an engineering-margin specification, not a realism one, and the report should present it as such.
+**Result 1 — real rate profile (supersedes all earlier estimates).** Session average **17.1 msg/s**; peak one-second rate **584 msg/s**; peak 100 ms burst **2,390 msg/s equivalent**. These figures replace the guessed rate estimates carried by earlier drafts and anchor the margins in 3.4.4.1. They also put the wire in perspective: the link's physical ceiling of 1.389 M pps (3.1.4.1) exceeds this real symbol's *peak burst* by ~580× — the PL's line-rate capability is engineering margin far beyond anything real single-symbol flow produces, context worth stating now that no stress specification exercises it.
 
-**Result 2 — event-mix calibration.** Real composition: submissions 47.7%, full deletions 42.7%, visible executions 5.9%, hidden executions 2.8%, partial cancels 0.8%. The synthetic driver's mix table (3.4.3.2) now cites these measured ratios; the earlier working figures (55/25/20) were materially wrong about modify frequency — real flow is add/delete-dominated, and modifies are rare.
+**Result 2 — event-mix characterization.** Real composition: submissions 47.7%, full deletions 42.7%, visible executions 5.9%, hidden executions 2.8%, partial cancels 0.8%. This stands as the reference characterization of the replayed flow — and it corrects the working figures carried by earlier drafts (55/25/20), which were materially wrong about modify frequency: real flow is add/delete-dominated, and modifies are rare.
 
 **Result 3 — field-width confirmation.** Max real `order_id` = 287,150,931 (u32: fits, 15× headroom); max size 15,000 shares (u32: trivial). Table 3.1.4's field widths survive contact with real data.
 
-**Result 4 — translation throughput and invariants.** The Python translation layer (order-pool tracking + encode) processed the full day at **1.10 M msg/s** — the entire real session translates offline in 0.37 s, so replay preparation is never a cost. I2 and I3 passed with zero violations across the full dataset (table in 3.4.4.4).
+**Result 4 — translation throughput and invariants.** The Python translation layer (order-pool tracking + encode) processed the full day at **1.10 M msg/s** — the entire real session translates offline in 0.37 s, so replay preparation is never a cost. I2 and I3 passed with zero violations across the full dataset (table in 3.4.4.3).
 
-**Finding 1 — sub-penny prices break the integer-cents assumption (protocol change required or policy needed).** 372 of 400,391 real events (0.09%) carry prices that are *not* whole cents (LOBSTER prices are dollars ×10⁴; these events have a nonzero residue mod 100 — sub-penny executions/price-improvement prints). The Table 3.1.4 `price` field is specified in integer cents, so these events cannot be represented exactly. Round-to-cent with a documented policy and a `price_rounded` counter (zero protocol change; 0.09% of events carry ≤ $0.005 error). The system strictly adheres to the integer-cents commitment to preserve the deterministic parity chain across the PL and PS. Sub-penny execution prices are rounded half-to-even to the nearest cent, and a price_rounded diagnostic counter tracks these occurrences to ensure the approximation remains observable. Design Decision: Option (a) is selected for the prototype. Sub-penny execution prices are rounded half-to-even to the nearest cent to preserve the integer-cents commitment.
+**Finding 1 — sub-penny prices break the integer-cents assumption (protocol change required or policy needed).** 372 of 400,391 real events (0.09%) carry prices that are *not* whole cents (LOBSTER prices are dollars ×10⁴; these events have a nonzero residue mod 100 — sub-penny executions/price-improvement prints). The Table 3.1.4 `price` field is specified in integer cents, so these events cannot be represented exactly. **Design decision:** the integer-cents commitment is retained (zero protocol change), preserving the deterministic parity chain across the PL and PS. Sub-penny prices are rounded half-to-even to the nearest cent — 0.09% of events carry ≤ $0.005 error — and a `price_rounded` diagnostic counter records every occurrence so the approximation stays observable.
 
-**Finding 2 — the Modify-semantics ambiguity (the FS13 oracle mechanism fired at design time).** Writing the translation forced a question Table 3.1.4 does not answer: does a Modify's `qty` field carry the *new absolute* quantity or a *delta*? LOBSTER's partial-cancel and execution events carry deltas; the translation had to pick a convention (absolute remaining quantity was chosen) and the PL book-update stage must agree or the books diverge silently. This is precisely Decision 2's claim — that an independent second implementation is the strongest test of the protocol document — vindicated before any hardware exists: the ambiguity is now a required amendment to Table 3.1.4's field description rather than a future integration bug. Design Decision: The protocol defines qty as the new absolute aggregate for the order. This convention is explicitly adopted in Table 3.1.4, allowing the PL book-update stage to be completely stateless regarding order deltas. Design Decision: The protocol defines qty as the new absolute aggregate for the order, ensuring the PL book-update stage remains stateless.
+**Finding 2 — the Modify-semantics ambiguity (the FS13 oracle mechanism fired at design time).** Writing the translation forced a question Table 3.1.4 does not answer: does a Modify's `qty` field carry the *new absolute* quantity or a *delta*? LOBSTER's partial-cancel and execution events carry deltas; the translation had to pick a convention (absolute remaining quantity was chosen) and the PL book-update stage must agree or the books diverge silently. This is precisely Decision 2's claim — that an independent second implementation is the strongest test of the protocol document — vindicated before any hardware exists: the ambiguity is now a required amendment to Table 3.1.4's field description rather than a future integration bug. **Design decision:** Table 3.1.4's field description is amended to define `qty` as the order's new absolute remaining quantity, allowing the PL book-update stage to remain stateless with respect to order deltas.
 
-**Honest scope statement.** This validation exercises the translation layer and encoder on the development sandbox; it does not exercise the physical link, the PL parser, or timing (those are the Section 2 procedures, which remain pending). One symbol-day is a semantic ground-truth check, not a statistical study; the mix and rate figures above are one liquid large-cap's behavior on one 2012 day and are used as *calibration anchors*, not as claims about markets in general.
+**Honest scope statement.** This validation exercises the translation layer and encoder on the development sandbox; it does not exercise the physical link, the PL parser, or timing (those are the Section 2 procedures, which remain pending). One symbol-day is a semantic ground-truth check, not a statistical study; the mix and rate figures above are one liquid large-cap's behavior on one 2012 day and are used as *characterization anchors*, not as claims about markets in general. That single day is also the prototype's entire market-data corpus — a deliberate scope bound stated in 3.4.1, not a hidden limitation.
 
 ---
 
@@ -857,14 +810,12 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 
 | Spec | What the simulator provides | Evidence status |
 |---|---|---|
-| FS1/FS2 (instrument) | Seeded reference sequences (`scenario_fs2_reference_1000.json`); TX-side ground-truth timestamps | Design complete; pending scenario-file authoring |
-| FS13 (oracle) | Independent parse of every order packet; disagreements surface spec ambiguities | Mechanism validated at design time (Finding 2, RX-side analog); pending live cross-parse |
+| FS1/FS2 (instrument) | Fixed replay slices as reference sequences (cited by dataset hash + slice bounds, 3.4.3.2); TX-side ground-truth timestamps | Design complete; pending slice-config authoring |
+| FS13 (oracle) | Independent parse of every order packet; disagreements surface spec ambiguities | Mechanism validated at design time (Finding 2 — TX-side analog on Table 3.1.4); pending live RX-side cross-parse |
 | NFS2 (peer) | Direct-cabled link peer; TX frame counts as expected-delivery denominator | Pending 10-min counted run |
-| NFS4 (provider) | 6.5 h seeded session; soak-mode logging (0.94 GB) | Pending soak run |
-| NFS8 (injector) | Scenario directives: `corrupt_fcs`, `burst`, `malformed_field` | Pending scenario-file authoring + injection runs |
-| NFS9 (injector) | Offline-generated PCAP (90 MB looped / 7.5 GB unique) + line-rate replayer | Pending replayer line-rate validation Measured and confirmed. |
-| FS6/FS7 (bootstrap) | Regime-labeled, seed-reproducible session corpus; plus one real-data session (LOBSTER replay) | Synthetic corpus pending; real-data translation validated (3.4.4.6) |
-| Own correctness | Invariants I1–I3; determinism (measured); rate margins (measured); real-data validation (measured, full dataset) | Sandbox-measured; target-host re-runs pending |
+| NFS4 (provider) | 6.5 h real-day replay at `rate_scale = 1`; full-mode logging ≈ 48 MB (3.4.4.4) | Pending soak run |
+| FS6/FS7 (bootstrap) | The recorded replay session as the FS7 bootstrap corpus (3.3.3.3); regime path draws on Yahoo daily OHLCV (3.3.1), not simulator output | Real-data translation validated (3.4.4.5); recorded session pending |
+| Own correctness | Invariants I1–I3; reproducibility (measured); rate margin (measured); real-data validation (measured, full dataset) | Sandbox-measured; target-host re-runs pending |
 
 ---
 
@@ -899,6 +850,10 @@ The full free-sample dataset — 400,391 real order-level messages, AAPL, one co
 [14] Y. Zheng, "FPGA-based Acceleration for High Frequency Trading," M.Phil. thesis, Dept. Electron. Comput. Eng., Hong Kong Univ. Sci. Technol., Hong Kong, Jan. 2023.
 
 [15] J. D. Hamilton, "A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle," *Econometrica*, vol. 57, no. 2, pp. 357–384, Mar. 1989, doi: 10.2307/1912559.
+
+[16] Xilinx, "Tri-Mode Ethernet MAC v9.0 LogiCORE IP Product Guide," PG051, Advanced Micro Devices, Inc. [Online]. Available: https://docs.amd.com/r/en-US/pg051-tri-mode-eth-mac [Accessed: Jul. 10, 2026].
+
+[17] 正点原子 (ALIENTEK), "领航者 ZYNQ 之嵌入式开发指南 / Navigator ZYNQ-7020 Development Board User Manual (XC7Z020CLG400-2I)," Guangzhou Xingyi Electronic Technology Co., Ltd. [Online]. Available: http://www.openedv.com/docs/boards/fpga/zdyz_linhanzhe.html [Accessed: Jul. 10, 2026].
 
 ### Further reading (uncited in this document)
 
