@@ -55,19 +55,15 @@ The secondary objective is an End-of-Day (EOD) optimization pipeline that classi
 
 ## 3.1 PL (FPGA) Market Data Path Subsystem
 
-All numeric analysis in 3.1.4 is derivable on paper today (line-rate arithmetic, cycle budgets, datasheet resource math) — no code required.
-
 Figure 2 shows the PL block structure and the shared AXI-Lite register bank at the PS boundary, using the stage names adopted throughout this section (Protocol Decode / Build Order Book / Protocol Encode).
 
 ---
 
 ### 3.1.1 Overview and Specification Mapping
 
-The Programmable Logic (PL) subsystem implements the entire wire-to-snapshot market data path and the order egress path in programmable logic on the AMD Xilinx Zynq-7000 (XC7Z020CLG400-2I) device. To isolate live trading execution from operating system scheduling jitter, the point-to-point Gigabit Ethernet link is terminated directly on a dedicated PL-wired RGMII Ethernet interface. This hardware-centric path placement is selected because a conventional software-based network path running on the Processing System (PS) cannot meet the project's sub-microsecond latency specifications. A standard Linux network socket distribution introduces kernel protocol stack traversal, interrupt handling overhead, and context-switching jitter that together cost tens to hundreds of microseconds per packet. Moving the protocol parsing and order book aggregation blocks entirely into the PL fabric completely removes the operating system from the critical datapath, delivering microsecond-class, clock-cycle-exact execution determinism that safely satisfies the ≤ 1.5 packet-to-snapshot budget of FS1.
+The Programmable Logic (PL) subsystem implements the wire-to-snapshot market data path and order egress path on an AMD Xilinx Zynq-7000 (XC7Z020CLG400-21) device. To eliminate operating system scheduling jitter and kernel network stack traversal (which introduce tens to hundreds of microseconds of latency), a point-to-point Gigabit Ethernet link terminates directly on a dedicated PL RGMII Ethernet interface. This hardware path removes the OS from the critical path, ensuring clock-cycle-exact execution determinism to satisfy the ≤ 1.5 µs packet-to-snapshot budget of FS1.
 
-On the receive side, the PL subsystem validates and parses each custom UDP market data packet at fixed byte offsets, maintains a 10-level bid / 10-level ask limit order book (an L3-to-L1/L2 aggregation), and publishes the resulting top-of-book snapshot to the PS through an AXI-Lite register bank on `M_AXI_GP0` (snapshot fields plus an incrementing `seq` register, committed atomically in one clock edge). On the transmit side, it receives risk-validated order fields written by the PS into the same register bank, begins encoding on the doorbell-register write strobe, encodes them into the fixed-length binary order format defined by FS13, and transmits them through the same PL GbE interface.
-
-This subsystem is directly responsible for the following specifications:
+On ingress, the PL validates and parses custom UDP market data packets, maintains a 10-level bid/ask limit order book, and publishes top-of-book snapshots atomically to the Processing System (PS) via an AXI-Lite register bank on `M_AXI_GP0`. On egress, it samples risk-validated order fields from the PS on a doorbell strobe, encodes them into the fixed-length binary layout required by FS13, and transmits them onto the link.
 
 | Spec | Role of PL subsystem |
 | :--- | :--- |
@@ -76,16 +72,15 @@ This subsystem is directly responsible for the following specifications:
 | **NFS1** | Owns the two PL segments (RX decode, TX encode) of the ≤ 50 μs end-to-end budget. |
 | **NFS2** | Owns link integrity: zero unexplained frame drops over a 10-minute window. |
 | **NFS6** | Owns the resource envelope: < 75% LUT, < 85% BRAM at 125 MHz with WNS > 0 ns. |
-| **Fault handling (partial)** | Owns the hardware fault path: checksum-fail discard and FIFO-overflow handling with fault counters. |
-| **NFS4 (partial)** | Hardware fault paths (FCS discard, FIFO-overflow handling, drop counters) keep line-rate faults from escalating into a session-ending hang; primary ownership of the 6.5-hour stability requirement remains with the PS (3.2.1). |
+| **Fault Path** | Handles checksum failures (FCS drop) and FIFO overflows via localized diagnostic counters. |
 
 ---
 
 ### 3.1.2 Engineering Design Process
 
-Three significant design decisions shaped this subsystem. Quantitative justifications regarding line-rate throughput, cycle budgets, and resource envelopes are integrated directly into each decision to confirm design feasibility.
+#### Decision 1: MAC Layer Implementation — Vendor IP vs. Minimal Custom MAC
 
-#### Decision 1 — MAC layer implementation: vendor IP vs. minimal custom MAC
+Development speed is the binding constraint because the pipeline cycle budget closes comfortably. Pre-verified vendor IP minimizes verification loop iterations.
 
 | Criterion (weight) | Xilinx TEMAC IP (selected) | Minimal custom MAC |
 | :--- | :--- | :--- |
@@ -95,26 +90,25 @@ Three significant design decisions shaped this subsystem. Quantitative justifica
 | Protocol generality (20%) | 5 (High — robust standard interface ecosystem) | 2 (Low — limited point-to-point link only) |
 | **Weighted result (1.0–5.0 scale)** | **4.0 — Selected** | 3.2 |
 
-*   **Rationale:** Development speed represents the binding constraint because the pipeline cycle budget closes comfortably. Standard engineering literature supports instantiating off-the-shelf vendor cores to minimize verification loops.
-*   **Integrated MAC Resource Envelope Analysis (NFS6):** Per Xilinx product guide specifications (PG051 [16]), the Tri-Mode Ethernet MAC core utilizes ≈1,500 registers and ≈3,000 LUTs along with 3 Block RAM blocks for internal streaming FIFOs. While a custom MAC would minimize this footprint, the XC7Z020's spacious resource profile allows us to absorb this overhead safely.
-*   **Integrated MAC Latency Impact:** The core introduces a deterministic internal pipeline delay of ≈20 clock cycles during RGMII DDR capture, which scales to roughly 160 ns at 125 MHz. This delay is thoroughly accounted for in the available safety margins calculated under Decision 2.
+*   **Resource Envelope Analysis (NFS6):** Per Xilinx PG051, the Tri-Mode Ethernet MAC utilizes ≈1,500 registers, ≈3,000 LUTs, and 3 BRAM blocks for streaming FIFOs. The XC7Z020 resource profile safely absorbs this footprint.
+*   **Latency Impact:** The core introduces a deterministic pipeline delay of ≈20 clock cycles during RGMII DDR capture (≈160 ns at 125 MHz), accounted for in Decision 2.
 
-#### Decision 2 — Parse architecture: store-and-forward vs. cut-through streaming parse
+#### Decision 2: Parse Architecture — Store-and-Forward vs. Cut-Through Streaming Parse
 
-*   **Alternatives:** Store-and-forward buffers the complete frame before decoding; cut-through streams and slices fields in real time at fixed byte offsets.
-*   **Integrated Line-Rate Throughput Analysis :** The maximum theoretical packet rate of a 1 Gbps link for our 24-byte payload configuration is derived below:
+*   **Line-Rate Throughput Analysis:** For a 24-byte payload, the maximum theoretical packet rate over a 1 Gbps link is derived as:
     $$\text{Frame Over Wire} = 8\ \text{Preamble} + 14\ \text{Ethernet} + 20\ \text{IPv4} + 8\ \text{UDP} + 24\ \text{Payload} + 4\ \text{FCS} + 12\ \text{IFG} = 90\ \text{bytes} = 720\ \text{bits}$$
     $$\text{Line Rate Saturation Limit} = 10^9\ \text{bits/sec} \div 720\ \text{bits} = 1,388,888\ \text{packets/second}$$
-    Serializing frame buffering under a store-and-forward design adds a 560 ns transmission serialization penalty (70 bytes post-preamble streaming at 1 octet/cycle), consuming over a third of the remaining budget.
-*   **Integrated Latency Path Decomposition (FS1):** Cut-through parsing is selected because fixed offsets permit deterministic bit slicing concurrently with line arrival, removing Look-Ahead serialization. The absolute step-by-step custom hardware logic latency totals exactly 77 clock cycles (616 ns): (1) Frame reception streaming: 560 ns (70 bytes), (2) FCS validation latch: 16 ns, (3) Tournament compare network reduction: 32 ns, and (4) Register bank synchronization: 8 ns. Accounting for the vendor-spec MAC core ingestion delay, sensitivity analysis establishes the following final path budgets against the 1.5 μs functional specification ceiling:
-    *   *Optimistic Ingest Assumption (100 ns):* $616\ \text{ns} + 100\ \text{ns} = 716\ \text{ns}$ (**52% Safety Margin**).
-    *   *Pessimistic Ingest Assumption (400 ns):* $616\ \text{ns} + 400\ \text{ns} = 1,016\ \text{ns}$ (**32% Safety Margin**).
-*   **Commit Policy:** To ensure data integrity, fields are held in speculative staging registers and committed to the order book only upon an Ethernet Frame Check Sequence (FCS) pass signal. On FCS fail, the frame is safely discarded, and a `parse_error` counter increments, fulfilling the fault-tolerant criteria of the fault-handling path.
+    Store-and-forward buffering adds a 560 ns serialization penalty (70 bytes post-preamble streaming at 1 octet/cycle), consuming over a third of the latency budget.
+*   **Latency Path Decomposition (FS1):** Cut-through parsing permits deterministic bit-slicing concurrently with line arrival. The step-by-step logic latency totals 77 clock cycles (616 ns) at 125 MHz: (1) Frame reception streaming: 560 ns (70 bytes), (2) FCS validation latch: 16 ns, (3) Tournament compare network reduction: 32 ns, and (4) Register bank synchronization: 8 ns. 
+*   **Sensitivity Analysis against FS1 (1.5 µs / 1500 ns ceiling):**
+    *   *Optimistic Ingest (100 ns MAC delay):* $616\ \text{ns} + 100\ \text{ns} = 716\ \text{ns}$ (**52% Safety Margin**).
+    *   *Pessimistic Ingest (400 ns MAC delay):* $616\ \text{ns} + 400\ \text{ns} = 1,016\ \text{ns}$ (**32% Safety Margin**).
+*   **Commit Policy:** Fields are held in staging registers and commit to the book only upon an Ethernet Frame Check Sequence (FCS) pass signal. If the FCS fails, the frame is discarded and `parse_error` increments.
 
-#### Decision 3 — Order book storage: BRAM-indexed structure vs. fixed register array
+#### Decision 3: Order Book Storage — BRAM-Indexed Structure vs. Fixed Register Array
 
-*   **Alternatives:** Hashing price levels into distributed Block RAM (BRAM), or instantiating a dedicated flip-flop register array.
-*   **Integrated Resource Footprint Projections (NFS6):** BRAM structures incur significant memory block fragmentation and address-lookup pipeline stalls at small depths. Because our prototype scope is bounded to a single symbol with a 10-level bid and 10-level ask depth, a fixed flip-flop register array is selected. This requires ≈1,500 registers (20 levels × 64 bits + snapshot 128 bits + counters) and ≈1,000 LUTs (to implement 20 parallel comparators and a 9-compare tournament reduction tree). This allows parallel combinational best-price extraction within a single 8 ns clock edge (125 MHz), ensuring clean timing closure (WNS > 0 ns) while utilizing 0 Block RAM blocks. Updates addressing a price level outside the 10-level working window are discarded and tracked via internal diagnostic counters (`dropped_out_of_window`).
+  **Resource Footprint Projections (NFS6):** Hashing prices into Block RAM (BRAM) incurs fragmentation and address-lookup pipeline stalls at small depths. Because the prototype scope is bounded to a single symbol with a 10-level depth, a fixed flip-flop register array is selected. 
+  This requires ≈1,500 registers (20 levels × 64 bits + snapshot 128 bits + counters) and ≈1,000 LUTs (implementing 20 parallel comparators and a 9-compare tournament reduction tree). This design achieves parallel combinational best-price extraction within a single 8 ns clock edge (125 MHz), ensuring timing closure (WNS > 0 ns) while utilizing 0 BRAM blocks. Updates outside the 10-level window are tracked via the `dropped_out_of_window` diagnostic counter. 
 
 ---
 
@@ -125,33 +119,31 @@ To provide a high-level view of our overall hardware constraints across all comb
 Table 3.1.6: Gate-Level Hardware Resource Footprint Projections (XC7Z020 / NFS6)
 | Component | Flip-Flop (FF) Estimate | Look-Up Table (LUT) Estimate | Block RAM (BRAM) |
 | :--- | :--- | :--- | :--- |
-| **Order Book Register Logic** | ≈1,500 registers | ≈1,000 LUTs (20 comparators) | 0 blocks |
-| **Xilinx TEMAC Core** | ≈1,500 registers | ≈3,000 LUTs (datasheet base) | 3 blocks (internal buffers) |
-| **Slicing & Header Decoders** | ≈500 registers | ≈1,000 LUTs (combinational masks) | 0 blocks |
-| **AXI-Lite GP0 Slave Bus Interface** | ≈500 registers | ≈800 LUTs (address decoding) | 0 blocks |
-| **Projected Footprint Totals** | **≈4,000 FFs (< 4%)** | **≈5,800 LUTs (≈11% of device)** | **3 Blocks (< 3%)** |
+| **Order Book Register Logic** | 1,500 registers | 1,000 LUTs (20 comparators) | 0 blocks |
+| **Xilinx TEMAC Core** | 1,500 registers | 3,000 LUTs (datasheet base) | 3 blocks (internal buffers) |
+| **Slicing & Header Decoders** | 500 registers | 1,000 LUTs (combinational masks) | 0 blocks |
+| **AXI-Lite Slave Interface** | 500 registers | 800 LUTs (address decoding) | 0 blocks |
+| **Projected Footprint Totals** | **4,000 FFs (< 4%)** | **5,800 LUTs (11% of device)** | **3 Blocks (3%)** |
 
-> **Strategic Disclaimer regarding Page Constraints:** Detailed analytical modeling regarding long-term history ring buffer allocation bounds, EOD walks, and server hyper-parameter search spaces are omitted in this subsection due to report page constraints; full quantitative technical analysis for those software-side blocks is handled in Section 3.9.
+> **Strategic Disclaimer regarding Page Constraints:** Long-term history ring buffer boundaries, EOD walks, and server hyper-parameter search spaces are handled in Section 3.9 due to page constraints.
 
 ---
 
 ### 3.1.3 Final Design Details
 
-#### 3.1.3.1 Receive pipeline
+#### 3.1.3.1 Receive Pipeline
 
-The receive path is structured as a five-stage streaming pipeline running at a clock frequency of 125 MHz:
+The receive path runs at 125 MHz as a five-stage streaming pipeline:
 
-1. **MAC RX (Xilinx TEMAC):** Handles RGMII DDR capture from the external PHY, preamble alignment, and FCS tracking, streaming data out over its AXI4-Stream RX interface. Non-matching destination MAC addresses are filtered out immediately.
-2. **IP/UDP Header Parse:** Fixed-offset validation of EtherType (0x0800), IP protocol (17), destination IP, and destination UDP port against compile-time constants. The UDP checksum is bypassed because payload integrity on this single-segment point-to-point link is covered by the Ethernet FCS.
-3. **Protocol Decode:** Executes real-time bit-slicing of the incoming custom payload directly into staging registers as bytes arrive.
-4. **Commit gate:** On TEMAC's `tuser` frame-good signal at `tlast`, the staged event commits; on frame-bad, discard + `parse_error` increment (fault-handling path).
-5. **Order book update:** Aggregates the committed L3 event (keyed by `order_id`) into the affected side/level. Extracting the new top-of-book occurs via combinational reduction, driving an atomic commit to the register bank and a single-cycle increment of the `seq` register.
+1. **MAC RX (Xilinx TEMAC):** Captures RGMII DDR data, aligns preambles, tracks FCS, and filters non-matching destination MAC addresses out of the AXI4-Stream interface.
+2. **IP/UDP Header Parse:** Validates EtherType (0x0800), IP protocol (17), destination IP, and UDP port at fixed byte offsets. UDP checksums are bypassed as the point-to-point link relies on the Ethernet FCS.
+3. **Protocol Decode:** Slices the custom incoming payload into staging registers in real time.
+4. **Commit gate:** Commits the staged event on a TEMAC `tuser` frame-good signal at `tlast`. If frame-bad asserts, the frame is dropped and `parse_error` increments (fault path).
+5. **Order book update:** Maps the committed event into the target level. Combinational reduction extracts the new top-of-book, executing an atomic register bank write and single-cycle `seq` increment.
 
-#### 3.1.3.2 Packet formats (FS13 interface contract)
+#### 3.1.3.2 Packet Formats (FS13 Interface Contract)
 
-All market data and order messages within the intraday critical path are bound to a strict fixed-width protocol specification. To minimize hardware design complexity and latency within the custom PL arithmetic blocks, the system enforces a strict integer cent assumption (`price_cents`) rather than utilizing sub-cent or floating-point precision units. Integer field encoding avoids multi-cycle floating-point conversion logic, keeping parsing and book aggregation fully deterministic. While standard equity price values map natively to integer cents, any incoming sub-cent prices from external feed simulations are systematically rounded half-to-even at the system ingress boundary and logged using localized diagnostic counters (`price_rounded`) to guarantee full data observability without degrading hardware cycle-time.
-
-Table 3.1.3 serves as the protocol interface contract for incoming market updates, and Table 3.1.4 establishes the exact byte-level layout required for outbound order packet verification under FS13.
+To avoid multi-cycle floating-point conversion logic and maintain deterministic clock-cycle execution, the system enforces an integer cent assumption (`price_cents`). Incoming sub-cent prices are rounded half-to-even at the ingress boundary and tracked using localized `price_rounded` counters.
 
 Table 3.1.3: Custom Market Data Payload Layout (RX Ingress Contract)
 | Field | Bit offset | Width (bits) | Protocol Encoding & Meaning |
@@ -185,15 +177,11 @@ Table 3.1.5: Order Book Register Sizing & Diagnostic Layout
 | **Top-of-book snapshot** | 1 | best_bid_price, best_bid_qty, best_ask_price, best_ask_qty | Committed atomically to AXI-Lite register bank on every tick |
 | **Diagnostic counters** | 4+ | parse_error, fcs_fail, dropped_out_of_window, tx_backpressure | NFS2 / fault-path observability |
 
-#### 3.1.3.4 PS interface and transmission pipeline
+#### 3.1.3.4 PS Interface and Transmission Pipeline
 
-The PS boundary is structured as a single AXI-Lite slave register bank on M_AXI_GP0. Snapshot publication is executed via a one-clock-edge atomic commit of all snapshot registers plus the `seq` increment, removing the possibility of hardware-side tearing. The multi-read consistency problem is handled on the PS side via a seqlock design pattern. FS1's measurable endpoint is the `seq`-increment write enable, observable with an ILA.
+The boundary consists of an AXI-Lite slave register bank on `M_AXI_GP0`. Snapshot fields and the `seq` register register commit simultaneously on a single clock edge to protect against multi-read hardware-side tearing; the software coordinates consistency via a seqlock pattern.
 
-The TX egress path operates as a four-stage pipeline:
-1. **Order-field write:** The PS writes the risk-approved order fields into the AXI-Lite register bank, payload first.
-2. **Doorbell strobe:** The PS writes to the doorbell register last; the strobe itself launches the encode stage on the following cycle. A `tx_ready` flag provides flow control.
-3. **Protocol Encode:** Packs the sampled data fields into the Table 3.1.4 fixed-offset format.
-4. **MAC TX (Xilinx TEMAC):** The vendor core frames the payload and transmits it over RGMII to the external PHY.
+The TX egress path operates as a four-stage pipeline: (1) PS writes order fields into the register bank; (2) PS writes to the doorbell register; (3) Protocol Encode packs data fields into the fixed-offset binary format; (4) The Xilinx TEMAC core frames and transmits the payload over RGMII.
 
 ---
 
@@ -202,10 +190,10 @@ The TX egress path operates as a four-stage pipeline:
 Table 3.1.7: Subsystem Traceability and Core Specification Compliance
 | Spec | How the final design satisfies it | Verification Metric | Status |
 | :--- | :--- | :--- | :--- |
-| **FS1** | Cut-through stream parsing completes custom book updates in 77 cycles, leaving a 32% margin under worst-case pipeline conditions. | Logic-analyzer trace from MAC valid to register latch. | **Y** |
-| **FS13** | Egress formatting matching Table 3.1.4 byte-offsets is hardcoded into sequential register arrays. | Wireshark inspection of simulated order frame. | **Y** |
-| **NFS1** | Hardware RX (0.61 μs) and TX (0.65 μs) path budgets consume less than 3% of the absolute system latency budget. | Synchronized hardware timestamp capture loop. | **Y** |
-| **NFS6** | Gate-level resource footprints map to approximately 11% of available fabric resources on the target device. | Vivado post-implementation utilization summary report. | **Y** |
+| **FS1** | Cut-through stream parsing completes updates in 77 cycles, leaving a 32% worst-case timing margin. | Logic-analyzer trace from MAC valid to register latch. | **Y** |
+| **FS13** | Egress formatting matches Table 3.1.4 byte-offsets hardcoded into sequential register arrays. | Wireshark inspection of simulated order frame. | **Y** |
+| **NFS1** | Hardware RX (0.61 µs) and TX (0.65 µs) paths consume less than 3% of total system budget. | Synchronized hardware timestamp capture loop. | **Y** |
+| **NFS6** | Gate-level footprints map to approximately 11% of LUTs and 3% of BRAM on the XC7Z020. | Vivado post-implementation utilization report. | **Y** |
 ## 3.2 PS (ARM OS Layer) Strategy & Risk Subsystem
 
 ### 3.2.1 Overview and Specification Mapping
