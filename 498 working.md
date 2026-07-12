@@ -382,7 +382,7 @@ This subsystem is directly responsible for the following specifications:
 | **FS7** | Sole owner: search ≥ 9 parameter combinations for the regime's strategy and select the metric-maximizing one, with deterministic (bit-identical) output. |
 | **FS8** | Sole owner of the gate: no configuration reaches the live system without explicit operator approval. (The PS Config Loader in 3.2.3.4 owns the *receiving* end of the chain of custody.) |
 | **FS12 (non-ess.)** | Sole owner: display and log pipeline stage, regime, selected parameters, backtest Sharpe, and approval status as each stage completes. |
-| **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes; input validation per 3.3.3.6. |
+| **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes; input validation per 3.3.3.1. |
 
 Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from 3.4's replay-based simulator, which carries tick-level (L3) events rather than daily bars, so it cannot be the OHLCV source; that source is **Yahoo Finance** (free, no license required). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2.
 
@@ -485,7 +485,7 @@ select params* = argmax over sharpe,
 
 Fills are priced at the touch, with no queue or market-impact modeling. Grid points are ranked by `mean(daily P&L) / std(daily P&L) × √252` — steady profit scores higher than the same profit earned inconsistently.
 
-**FS7 determinism.** FS7 requires bit-identical re-runs, not just correct output. Every nondeterminism source is closed by construction: no RNG (no fitted model or sampling, per Decisions 2–3), strictly sequential evaluation over ordered-list grids with canonical serialization (3.3.3.7), a single designated verification host (no cross-machine float drift), and a lexicographic tie-break on equal Sharpe. Verified by running the pipeline twice on the same input and byte-comparing the output.
+**FS7 determinism.** FS7 requires bit-identical re-runs, not just correct output. Every nondeterminism source is closed by construction: no RNG (no fitted model or sampling, per Decisions 2–3), strictly sequential evaluation over ordered-list grids with canonical serialization (3.3.3.5), a single designated verification host (no cross-machine float drift), and a lexicographic tie-break on equal Sharpe. Verified by running the pipeline twice on the same input and byte-comparing the output.
 
 ### 3.3.3.4 Risk Analysis and config generation
 
