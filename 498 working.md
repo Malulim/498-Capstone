@@ -613,8 +613,6 @@ Figure 3.5 shows the structure. *(Figure placeholder — two lanes: offline — 
 
 ## 3.4.2 Engineering Design Process
 
-Two decisions define this subsystem; both were settled by external constraints and the published record.
-
 ### Decision 1 — Market-data source: replay a real captured L3 trading day
 
 | Alternative | Outcome |
