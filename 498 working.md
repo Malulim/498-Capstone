@@ -57,13 +57,15 @@ The secondary objective is an End-of-Day (EOD) optimization pipeline that classi
 
 All numeric analysis in 3.1.4 is derivable on paper today (line-rate arithmetic, cycle budgets, datasheet resource math) — no code required.
 
+Figure 2 shows the PL block structure and the shared AXI-Lite register bank at the PS boundary, using the stage names adopted throughout this section (Protocol Decode / Build Order Book / Protocol Encode).
+
 ---
 
 ### 3.1.1 Overview and Specification Mapping
 
-The PL subsystem implements the entire wire-to-snapshot market data path and the order egress path in programmable logic on the XC7Z020[17]. On the receive side, it terminates the point-to-point Gigabit Ethernet link from the exchange simulator, validates and parses each custom UDP market data packet at fixed byte offsets, maintains a 10-level bid / 10-level ask limit order book (an L3-to-L1/L2 aggregation), and publishes the resulting top-of-book snapshot to the PS through an AXI-Lite register bank on M_AXI_GP0 (snapshot fields plus an incrementing `seq` register, committed atomically in one clock edge). On the transmit side, it receives risk-validated order fields written by the PS into the same register bank, begins encoding on the doorbell-register write strobe, encodes them into the fixed-length binary order format defined by FS13, and transmits them through the same PL GbE interface.
+The Programmable Logic (PL) subsystem implements the entire wire-to-snapshot market data path and the order egress path in programmable logic on the AMD Xilinx Zynq-7000 (XC7Z020CLG400-2I) device. To isolate live trading execution from operating system scheduling jitter, the point-to-point Gigabit Ethernet link is terminated directly on a dedicated PL-wired RGMII Ethernet interface. This hardware-centric path placement is selected because a conventional software-based network path running on the Processing System (PS) cannot meet the project's sub-microsecond latency specifications. A standard Linux network socket distribution introduces kernel protocol stack traversal, interrupt handling overhead, and context-switching jitter that together cost tens to hundreds of microseconds per packet. Moving the protocol parsing and order book aggregation blocks entirely into the PL fabric completely removes the operating system from the critical datapath, delivering microsecond-class, clock-cycle-exact execution determinism that safely satisfies the ≤ 1.5 packet-to-snapshot budget of FS1.
 
-The subsystem exists because the software network path cannot meet the project's latency specifications: a conventional Linux socket path incurs interrupt handling, kernel protocol stack traversal, and kernel-to-user copies that together cost tens to hundreds of microseconds per packet, which is incompatible with the ≤ 1.5 μs decode budget of FS1. By hardware/software partitioning, implementing the critical data path in the PL is structurally superior to the PS because programmable logic processes incoming packets with deterministic, microsecond-class, clock-cycle-exact latency, achieving nearly an order of magnitude faster tick-to-order response than a comparable software-only pipeline running on the PS. Placing the parse and book-build stages in the PL removes the operating system from the market-data critical path entirely.
+On the receive side, the PL subsystem validates and parses each custom UDP market data packet at fixed byte offsets, maintains a 10-level bid / 10-level ask limit order book (an L3-to-L1/L2 aggregation), and publishes the resulting top-of-book snapshot to the PS through an AXI-Lite register bank on `M_AXI_GP0` (snapshot fields plus an incrementing `seq` register, committed atomically in one clock edge). On the transmit side, it receives risk-validated order fields written by the PS into the same register bank, begins encoding on the doorbell-register write strobe, encodes them into the fixed-length binary order format defined by FS13, and transmits them through the same PL GbE interface.
 
 This subsystem is directly responsible for the following specifications:
 
@@ -71,19 +73,17 @@ This subsystem is directly responsible for the following specifications:
 | :--- | :--- |
 | **FS1** | Sole owner: packet arrival → decoded top-of-book snapshot available to PS in ≤ 1.5 μs. |
 | **FS13** | Sole owner of the egress half: order packets must conform to the fixed-length binary format. |
-| **NFS1** | Owns the two PL segments (RX decode, TX encode) of the ≤ 50 μs end-to-end budget (300 μs ceiling applies to the superseded interrupt design). |
+| **NFS1** | Owns the two PL segments (RX decode, TX encode) of the ≤ 50 μs end-to-end budget. |
 | **NFS2** | Owns link integrity: zero unexplained frame drops over a 10-minute window. |
-| **NFS6** | Owns the resource envelope: < 75% LUT, < 85% BRAM at 125 MHz with WNS > 0. |
+| **NFS6** | Owns the resource envelope: < 75% LUT, < 85% BRAM at 125 MHz with WNS > 0 ns. |
 | **Fault handling (partial)** | Owns the hardware fault path: checksum-fail discard and FIFO-overflow handling with fault counters. |
 | **NFS4 (partial)** | Hardware fault paths (FCS discard, FIFO-overflow handling, drop counters) keep line-rate faults from escalating into a session-ending hang; primary ownership of the 6.5-hour stability requirement remains with the PS (3.2.1). |
-
-Figure 3.1 shows the PL block structure and the shared AXI-Lite register bank at the PS boundary, using the stage names adopted throughout this section (Protocol Decode / Build Order Book / Protocol Encode).
 
 ---
 
 ### 3.1.2 Engineering Design Process
 
-Four significant design decisions shaped this subsystem. Quantitative justifications regarding line-rate throughput, cycle budgets, and resource envelopes are integrated directly into each decision to confirm design feasibility.
+Three significant design decisions shaped this subsystem. Quantitative justifications regarding line-rate throughput, cycle budgets, and resource envelopes are integrated directly into each decision to confirm design feasibility.
 
 #### Decision 1 — MAC layer implementation: vendor IP vs. minimal custom MAC
 
@@ -95,7 +95,7 @@ Four significant design decisions shaped this subsystem. Quantitative justificat
 | Protocol generality (20%) | 5 (High — robust standard interface ecosystem) | 2 (Low — limited point-to-point link only) |
 | **Weighted result (1.0–5.0 scale)** | **4.0 — Selected** | 3.2 |
 
-*   **Rationale:** Development and verification speed represent the binding constraints because the pipeline cycle budget closes comfortably. Standard engineering literature[6] supports instantiating off-the-shelf cores over custom layout verification.
+*   **Rationale:** Development speed represents the binding constraint because the pipeline cycle budget closes comfortably. Standard engineering literature supports instantiating off-the-shelf vendor cores to minimize verification loops.
 *   **Integrated MAC Resource Envelope Analysis (NFS6):** Per Xilinx product guide specifications (PG051 [16]), the Tri-Mode Ethernet MAC core utilizes ≈1,500 registers and ≈3,000 LUTs along with 3 Block RAM blocks for internal streaming FIFOs. While a custom MAC would minimize this footprint, the XC7Z020's spacious resource profile allows us to absorb this overhead safely.
 *   **Integrated MAC Latency Impact:** The core introduces a deterministic internal pipeline delay of ≈20 clock cycles during RGMII DDR capture, which scales to roughly 160 ns at 125 MHz. This delay is thoroughly accounted for in the available safety margins calculated under Decision 2.
 
