@@ -365,16 +365,14 @@ Full per-tick logging fails by arithmetic: `1.389 M/s × 128 B ≈ 178 MB/s`, an
 
 # 3.3 EOD Server Pipeline Subsystem
 
-> **Scope note:** an earlier draft of this subsystem also carried a non-essential text/LLM-sentiment path (FS9/FS10), which has been dropped from scope (rationale in the Section 2 footnote). Stage names are *Parameter Engineering, Regime Detection, Strategy Reoptimize, Backtest & Parameter Sweep, Risk Analysis, Generate JSON Config, Operator Approval*.
-> All numeric analysis in this section is derivable on paper today (dataset-size arithmetic, iteration-count budgets, complexity bounds, inequality proofs) — no code required. Quantitative analysis appears inline where each decision or design element needs it, not as a separate section.
+> **Scope note:** an earlier draft of this subsystem also carried a non-essential text/LLM-sentiment path (FS9/FS10), dropped from scope (rationale in the Section 2 footnote). Stage names are *Parameter Engineering, Regime Detection, Strategy Reoptimize, Backtest & Parameter Sweep, Risk Analysis, Generate JSON Config, Operator Approval*.
+> All numeric analysis in this section is derivable on paper today — dataset-size arithmetic, iteration-count budgets, complexity bounds, inequality proofs — and appears inline where each decision needs it, not as a separate section.
 
 ---
 
 ## 3.3.1 Overview and Specification Mapping
 
-The EOD (End-of-Day) Server Pipeline is the adaptation layer of AQTA — the component that makes the system *Adaptive* rather than a fixed-strategy appliance. It runs on a host server, off the intraday critical path, and closes the loop between one trading session and the next: it ingests the session history exported by the PS together with historical daily OHLCV data, classifies the next trading day's market regime (FS6), re-optimizes the parameters of the strategy assigned to that regime by exhaustively backtesting a bounded parameter grid (FS7). The result is assembled into a candidate JSON configuration and presented to a human operator, whose explicit approval is the only path by which it can reach the live system (FS8, transmitted to the PS Config Loader of 3.2.3.4); a REJECT or no-approval outcome instead uses the PS HOLD latch described in 3.2.3.3 until an operator clears it.
-
-The subsystem completes a three-tier latency/flexibility hierarchy established in 3.1 and 3.2: the PL is deterministic at nanosecond scale and fixed for the session; the PS decides in microseconds but is reconfigurable nightly; the EOD server may take minutes but is rewritable — the analytics, the parameter values, and the judgment about what tomorrow's market looks like. Each tier trades orders of magnitude of latency for flexibility, and the register-bank and JSON-config interfaces between tiers confine the slower tier's influence on the faster one to two channels: config load at session start, and the HOLD latch on a no-approval outcome, which only narrows the faster tier's behavior (stop trading) and never widens it. On the EOD tier the binding constraint is not latency — NFS5 grants 30 minutes — but **correctness, reproducibility, and auditability**: FS7 demands bit-identical re-runs, FS8 demands that a human can veto every output. Those two properties, not throughput, drive every design decision below.
+The EOD (End-of-Day) Server Pipeline is the adaptation layer of AQTA — the component that makes the system *Adaptive* rather than a fixed-strategy appliance. It runs on a host server, off the intraday critical path, and closes the loop between one trading session and the next: it ingests the session history exported by the PS together with historical daily OHLCV data, classifies the next trading day's market regime (FS6), and re-optimizes the parameters of the strategy assigned to that regime by exhaustively backtesting a bounded parameter grid (FS7). The result is assembled into a candidate JSON configuration and presented to a human operator, whose explicit approval is the only path by which it can reach the live system (FS8, transmitted to the PS Config Loader of 3.2.3.4); a REJECT or no-approval outcome instead uses the PS HOLD latch of 3.2.3.3 until an operator clears it. Because NFS5 grants a 30-minute budget, the binding constraints on this tier are **correctness, reproducibility, and auditability** — FS7's bit-identical re-runs and FS8's human veto — and those two properties drive every decision below.
 
 This subsystem is directly responsible for the following specifications:
 
@@ -386,67 +384,48 @@ This subsystem is directly responsible for the following specifications:
 | **FS12 (non-ess.)** | Sole owner: display and log pipeline stage, regime, selected parameters, backtest Sharpe, and approval status as each stage completes. |
 | **NFS5 (non-ess.)** | Sole owner: full pipeline (ingestion → classification → optimization → approval prompt) within 30 minutes; input validation per 3.3.3.6. |
 
-Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from sessions traded against 3.4's replay-based simulator, which carries tick-level (L3) event streams; it does not aggregate those streams into daily bars, so it is not the daily-OHLCV source. The daily OHLCV source is **Yahoo Finance** (free, no license required) — the same source already exercised in the preliminary validation run (3.3.3.3.1). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2, exactly as the register bank table of 3.2.3.1 is jointly owned with 3.1.
+Upstream dependency: FS5's exported session history and a historical daily OHLCV dataset are the pipeline's inputs. The session history comes from 3.4's replay-based simulator, which carries tick-level (L3) events rather than daily bars, so it cannot be the OHLCV source; that source is **Yahoo Finance** (free, no license required). Downstream contract: the JSON configuration schema of 3.3.3.5, consumed by the PS Config Loader — jointly owned with 3.2.
 
-Figure 3.3 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor, which belongs to the PS peripheral group per the final subsystem split, and minus the External Resources / Web-News-Social block and its NLP/LLM Pipeline and sentiment arrows, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.3 and 3.3.3.7, not as a generic link.)*
+Figure 3.3 shows the pipeline structure. *(Figure placeholder — reuse the SERVER subgraph of the system block diagram, minus the Console Monitor (belongs to the PS peripheral group) and minus the External Resources / Web-News-Social block and its NLP/LLM pipeline, dropped along with FS9/FS10 — see Section 2 footnote. The EOD→PS arrow should be annotated as the HOLD-latch/config-push path of 3.2.3.3 and 3.3.3.7, not as a generic link.)*
 
 ---
 
 ## 3.3.2 Engineering Design Process
 
-Three significant design decisions shaped this subsystem. The recurring theme differs from 3.1/3.2: there, the specs priced in *latency* and the decisions bought determinism of *timing*; here, the specs price in *reproducibility and human oversight* and the decisions buy determinism of *results*. Where a rationale is quantitative, the supporting arithmetic appears inline with the decision it licenses.
+Three design decisions shaped this subsystem.
 
 ### Decision 1 — Execution environment: Python host pipeline
 
-A scan of the open-source tooling landscape converged quickly on one answer: a Python 3 host pipeline — pandas/NumPy for data handling, the standard library for orchestration, the strategy kernel handled separately below (3.3.3.3). Python has the deepest library ecosystem for this workload, the most community resources to build against, and the lowest development cost of any realistic option — and NFS5's 30-minute budget is generous enough that Python's performance profile is simply not a constraint worth trading that away for.
+A scan of the open-source tooling landscape converged quickly: a Python 3 host pipeline — pandas/NumPy for data handling, the standard library for orchestration, the strategy kernel handled separately in 3.3.3.3. Python has the deepest library ecosystem for this workload and the lowest development cost of any realistic option, and NFS5's 30-minute budget is generous enough that Python's performance profile is not worth trading away for a faster language.
 
 ### Decision 2 — Regime classifier (FS6): rule-based thresholds vs. Hidden Markov Model
 
-The classifier's job in AQTA is *routing* — selecting which of the three pre-built strategies (3.2.3.2: Trending→Momentum, Ranging→Mean Reversion, Volatile→Defensive) runs tomorrow — not alpha generation. The two real candidates were a two-feature rule-based threshold classifier and a Hidden Markov Model, the more statistically sophisticated approach the regime-detection literature generally favors:
+The classifier only routes tomorrow to one of three pre-built strategies (3.2.3.2), not alpha generation, so the Hidden Markov Model (HMM) favored by the regime-detection literature for its regime-persistence accuracy [15] is rejected: FS6's verification only checks that ≥ 3 regimes appear, never accuracy, so that advantage is untested here; an HMM must also be iteratively fit rather than computed by a fixed formula, is not guaranteed to converge identically run-to-run, and adds an unfamiliar dependency (`hmmlearn`); and its state posteriors require post-hoc labeling, undermining the FS8 operator-auditability requirement that a threshold rule such as "vol > 75th percentile ⇒ Volatile" satisfies by inspection in seconds. The two-feature rule-based threshold classifier is therefore selected: unit-testable in a day, deterministic, and directly auditable — decisive given the team's bandwidth already committed to 3.1/3.2.
 
-| Dimension | Rule-based threshold (selected) | Hidden Markov Model |
-|---|---|---|
-| Classification fidelity | Adequate for a routing decision | Best-in-literature for regime persistence [15] — but FS6's verification only checks ≥ 3 regimes appear, never scores accuracy, so this advantage is never actually tested |
-| Implementation & verification cost, given team capability | Two features, three comparisons; exhaustively unit-testable in a day | The HMM has to be *fit* to data (an iterative statistical procedure, not a fixed formula), it isn't guaranteed to converge to the same answer on every run, and it's a new dependency (`hmmlearn`) none of the team has used before |
-| Operator auditability (FS8) | "vol > 75th percentile ⇒ Volatile" is checkable against a chart in seconds | State posteriors need post-hoc labeling and give no intuitive account of why a day was classified a given way — the FS8 approval step becomes a formality |
-
-HMM wins only on the one dimension FS6 doesn't verify; the rule-based classifier wins on implementation cost and on the auditability FS8 actually requires, which is decisive given the team's capability and bandwidth already committed to 3.1/3.2.
+A second iteration followed within the rule-based approach itself. The first formulation used fixed cutoffs (e.g. "vol > 25% ⇒ Volatile"): simple, but capable of collapsing every day to one label on a calm stretch that never crosses the constant — violating FS6's ≥ 3-regime requirement outright. Replacing the fixed cutoffs with percentile thresholds closes this failure mode structurally rather than by luck: the top 25% of days by volatility are VOLATILE by definition, and TRENDING/RANGING split the rest, so a single-label output becomes impossible, not just unlikely. This percentile scheme is the design carried into 3.3.3.2.
 
 ### Decision 3 — Parameter search (FS7): exhaustive grid
 
-We exhaustively enumerate the 27-point grid rather than using a smarter search method (e.g. Bayesian optimization): the grid is cheap enough to fully evaluate (arithmetic below), a full sweep is deterministic by construction — which "smart" search methods aren't, and directly satisfies FS7's bit-identical requirement — and it also gives the operator the *complete* result table for FS8 review, not just the points a search algorithm happened to sample.
+The 27-point grid is enumerated exhaustively rather than searched with a smarter method (e.g. Bayesian optimization): it is cheap enough to fully evaluate (arithmetic below), a full sweep is deterministic by construction — which "smart" search isn't — directly satisfying FS7's bit-identical requirement, and it gives the operator the *complete* result table for FS8 review rather than just the points a search algorithm happened to sample.
 
-**Runtime budget (NFS5) — the arithmetic behind "the grid is cheap."** NFS5 allows 30 minutes on the reference workload (1 year of daily OHLCV). The pipeline's cost is dominated by one term — the sweep — and every other stage is bounded by trivial arithmetic:
+**Runtime budget (NFS5).** NFS5 allows 30 minutes on the reference workload (1 year of daily OHLCV). Every stage but the sweep is bounded by trivial arithmetic:
 
 ```
-Regime path input:      252 daily bars → feature computation O(n), n = 252    → milliseconds
-Regime classification:  two percentile lookups + three comparisons, O(1)      → microseconds
+Regime path:    252 daily bars, O(n) feature computation           → milliseconds
+Classification: two percentile lookups + three comparisons, O(1)   → microseconds
 
-Sweep workload:
-  snapshot records/session = 100 Hz × 6.5 h × 3600 s/h = 2.34 M records
-  grid size                = 27 combinations
-  Per grid point: one pass of vectorized NumPy/pandas array operations (signal computation,
-    position derivation, cumulative P&L) over the 2.34 M-row snapshot array — vectorized
-    operations at this scale are expected to run in well under a second per grid point on
-    commodity hardware (order-of-magnitude expectation from vectorized-array performance;
-    the wall-clock run on the EOD server is the pending compliance evidence, 3.3.4)
-  sweep time (pessimistic allowance) ≈ 1 min, covering I/O, pandas overhead, and repeated
-    array allocation across 27 points — a deliberate ~50× cushion over the expectation,
-    so the NFS5 argument survives even a large miss in the per-point estimate
+Sweep: 100 Hz × 6.5 h session = 2.34 M snapshot records; grid = 27 points.
+  Each point is one vectorized NumPy/pandas pass over the 2.34 M-row array
+  (signal computation, position derivation, cumulative P&L) — expected well
+  under 1 s/point on commodity hardware. Pessimistic allowance ≈ 1 min for
+  I/O and pandas overhead — a ~50× cushion over that expectation, so the
+  NFS5 argument survives a large miss in the per-point estimate (wall-clock
+  confirmation is pending, 3.3.4).
 
-Report/serialize:  negligible
-
-Pipeline total (pessimistic): ≈ 1–2 min  →  ≥ 15× margin against NFS5 = 30 min
+Pipeline total (pessimistic): ≈ 1–2 min → ≥ 15× margin against NFS5's 30 min
 ```
 
-This arithmetic is what licenses both Decision 1 and this one: Python is fast enough and exhaustive search is affordable, because a vectorized sweep over 27 grid points costs a small fraction of the 30-minute budget regardless of where the exact per-point timing lands. The margin is a *design allowance*, not slack to be admired — it absorbs grid growth and multi-session backtest windows, and the sensitivity table below bounds exactly how far:
-
-| Configuration | Grid points | Est. sweep time (scaled from the ≈ 1 min / 27-point allowance above) | Verdict |
-|---|---|---|---|
-| Prototype: 1 symbol × 27-pt grid × 1 session | 27 | ≈ 1 min | Selected operating point |
-| 5-value axes (125-pt grid) | 125 | ≈ 4–5 min (≈ 125⁄27 × the 27-point allowance) | Comfortably fits NFS5 — vectorized per-point cost scales with grid points, not with the ~2.34 M-record snapshot array |
-
-The table bounds the design's validity region explicitly: exhaustive grid + vectorized backtest kernel is correct for the specified prototype and its first two growth steps.
+This margin also licenses Decision 1 — Python is fast enough, and exhaustive search over the prototype's 27-point grid is affordable with room to spare.
 
 ---
 
@@ -456,16 +435,16 @@ The pipeline is a sequential staged program; Figure 3.4 shows the stage graph wi
 
 ### 3.3.3.1 Data import and Parameter Engineering
 
-Inputs are validated before any computation: schema check, monotonic-timestamp check, minimum-history check. The floor is defined as **calibration window + 126 trading days**, not a fixed number: the calibration window (config-adjustable, ~60–90 trading days is enough for the percentile scheme in 3.3.3.2 to be statistically meaningful) has to sit entirely *before* the earliest day being classified, and FS6's own verification method classifies a 6-month (126 trading day) span — so the floor is tied to whatever calibration window is configured, and can never be tighter than what FS6's own verification procedure needs to run at all. Validation failure aborts — no config from bad data.
+Inputs are validated before any computation: schema check, monotonic-timestamp check, minimum-history check. The history floor is **calibration window + 126 trading days** rather than a fixed number — the calibration window (config-adjustable) must sit entirely before the earliest day classified, and FS6's own verification classifies a 6-month (126-day) span, so the floor can never be tighter than that. Validation failure aborts — no config from bad data.
 
 Two features are computed from daily OHLCV closes:
 
 | Feature | Definition | Window |
 |---|---|---|
-| Realized volatility `σ` | `σ = std(ln(Cₜ/Cₜ₋₁)) × √252` | 20 trading days (same window as the SMA₂₀ trend leg, for consistency) |
+| Realized volatility `σ` | `σ = std(ln(Cₜ/Cₜ₋₁)) × √252` | 20 trading days (matches the SMA₂₀ trend leg) |
 | Trend strength `T` | `T = (SMA₅ − SMA₂₀) / SMA₂₀` | 5- and 20-day SMAs |
 
-Both are standard constructions; the calibration scheme below (3.3.3.2) is the real design contribution, with its non-degeneracy guarantee proven there.
+Both are standard constructions; the calibration scheme below (3.3.3.2) is the real design contribution, with its non-degeneracy guarantee proven in 3.3.2 Decision 2.
 
 ### 3.3.3.2 Regime Detection (FS6)
 
@@ -478,23 +457,21 @@ elif |T_today| ≥ θ_trend:  regime = TRENDING   → Momentum
 else:                      regime = RANGING    → Mean Reversion
 ```
 
-Pure function of the input window — no state, no seed, no fit. Unit tests cover all three branches plus both boundary equalities (`≥` resolves ties toward the safer, Defensive branch).
+Pure function of the input window — no state, no seed, no fit. Unit tests cover all three branches plus both boundary equalities (`≥` resolves ties toward the safer, Defensive branch). Non-degeneracy over FS6's ≥ 3-regime requirement follows structurally from the percentile scheme — see the threshold-iteration rationale in 3.3.2 Decision 2.
 
-**Non-degeneracy.** FS6 requires ≥ 3 distinct regimes over a 6-month test window. Fixed thresholds (e.g. "vol > 25% ⇒ Volatile") fail this on a calm stretch that never crosses the constant, collapsing every day to one label. Percentile-based thresholds don't have that failure mode: by definition, the top 25% of days by volatility in the calibration window are classified VOLATILE, and TRENDING/RANGING split the remainder — a single-label output is structurally impossible.
-
-The classifier calibrates on a trailing window and applies that threshold to the next, out-of-sample window, since a live system cannot compute a threshold from data it hasn't seen yet. 3.3.3.3.1 validates this deployed trailing-window scheme directly on a real 6-month window and confirms all three regimes present (80/29/17). Extending that validation across additional historical windows is the scheduled next verification step, not an open design question — the classification rule itself is final.
+The classifier calibrates on a trailing window and applies the threshold to the next, out-of-sample window, since a live system cannot compute a threshold from data it hasn't seen yet.
 
 ### 3.3.3.3 Strategy Reoptimize — Backtest & Parameter Sweep (FS7)
 
-Working grids (each 3 × 3 × 3 = 27 combinations ≥ FS7's minimum 9), deliberately coarse per Decision 3's overfitting mitigation. Thresholds below are in the daily-bar proxy units of the 3.3.3.3.1 validation run; the live intraday config carries their integer half-cent equivalents per 3.2.3.2 (the validation run substituted a vol-window axis for the Defensive spread floor, since daily bars carry no spread):
+Grid width follows each strategy's actual tunable levers rather than a forced 3×3×3 shape: Momentum and Mean Reversion each expose three independent parameters per their 3.2.3.2 core rule, but Defensive's rule ("suppress entries, allow only position-reducing orders toward flat") only has two — a spread floor gating when reducing orders are allowed to fire, and a position scalar setting how much to reduce by. A third axis would not correspond to any real degree of freedom in that strategy, so its grid is 3×3 = 9, still meeting FS7's ≥ 9-combination floor exactly rather than by padding. Grid values are specified in decimal units below; the live intraday config carries their integer half-cent equivalents per 3.2.3.2:
 
-| Strategy | Parameter 1 | Parameter 2 | Parameter 3 |
-|---|---|---|---|
-| Momentum | lookback ∈ {5, 10, 20} | entry threshold ∈ {0.005, 0.01, 0.02} | position scalar ∈ {0.5, 1.0, 1.5} |
-| Mean Reversion | MA window ∈ {10, 20, 50} | deviation threshold ∈ {0.01, 0.02, 0.05} | position scalar ∈ {0.5, 1.0, 1.5} |
-| Defensive | spread floor ∈ {1, 2, 4} cents | vol cutoff ∈ {0.1, 0.2, 0.4} | position scalar ∈ {0.25, 0.5, 1.0} |
+| Strategy | Parameter 1 | Parameter 2 | Parameter 3 | Grid size |
+|---|---|---|---|---|
+| Momentum | lookback ∈ {5, 10, 20} | entry threshold ∈ {0.005, 0.01, 0.02} | position scalar ∈ {0.5, 1.0, 1.5} | 27 |
+| Mean Reversion | MA window ∈ {10, 20, 50} | deviation threshold ∈ {0.01, 0.02, 0.05} | position scalar ∈ {0.5, 1.0, 1.5} | 27 |
+| Defensive | spread floor ∈ {1, 2, 4} cents | position scalar ∈ {0.25, 0.5, 1.0} | — | 9 |
 
-The kernel replays the **snapshot stream exported by the Execution Logger** (FS5) rather than synthetic bars, so the sweep evaluates strategies on the data distribution the deployed strategy will see. Bootstrap case (no live sessions yet): the recorded real-data replay session from 3.4 (LOBSTER replay) serves as the initial corpus — a single session, thin by construction, growing as live sessions accumulate. The daily-OHLCV dataset feeds only the regime path, not the sweep.
+The kernel replays the **snapshot stream exported by the Execution Logger** (FS5) rather than synthetic bars, so the sweep evaluates strategies on the data distribution the deployed strategy will see. Bootstrap case (no live sessions yet): the recorded LOBSTER replay session from 3.4 serves as the initial corpus — a single session, thin by construction, growing as live sessions accumulate. The daily-OHLCV dataset feeds only the regime path, not the sweep.
 
 ```
 for params in grid (fixed lexicographic order):          # determinism: fixed order
@@ -506,59 +483,23 @@ select params* = argmax over sharpe,
        ties broken by lexicographic parameter order      # total order ⇒ unique winner
 ```
 
-**Scope.** The backtest strategy logic is a separate Python/NumPy implementation, not a port of the PS's C code — simpler to build, at the cost of not being an exact replay of live behavior. The PS Runtime Risk Guard and the operator's review at approval time already cover that gap, so it doesn't weaken FS3 or FS8. Fills are priced at the touch, with no queue or market-impact modeling. Grid points are ranked by a Sharpe-style score, `mean(daily P&L) / std(daily P&L) × √252` — steady profit scores higher than the same profit earned inconsistently. FS7's bit-identical requirement is about re-running this pipeline on the same input, not matching the PS — and the computation is deterministic and single-threaded, so that's satisfied.
+Fills are priced at the touch, with no queue or market-impact modeling. Grid points are ranked by `mean(daily P&L) / std(daily P&L) × √252` — steady profit scores higher than the same profit earned inconsistently.
 
-**FS7 determinism.** FS7 requires bit-identical re-runs, not just correct output. Every source of nondeterminism is closed:
-
-| Source | How it's eliminated |
-|---|---|
-| Random init / sampling | No fitted model, no sampling (Decisions 2–3) — no RNG is used |
-| Parallel evaluation order | Sweep runs strictly sequential in a fixed order — stable summation |
-| Hash/dict iteration | Grids are ordered lists; serialization is canonical (3.3.3.7) |
-| Cross-machine float differences | Verification runs both re-run passes on one designated host |
-| Tie on Sharpe | Lexicographic tie-break — winner is always unique |
-
-Verified by running the pipeline twice on the same input and byte-comparing the output.
-
-#### 3.3.3.3.1 Preliminary validation run (real data)
-
-The procedures above were run end-to-end against real AAPL daily OHLCV (1984-09-07 to 2008-10-14, BSD-licensed public archive, fetched via raw.githubusercontent.com) as a preliminary check ahead of full implementation. This is a stand-in for the production source (Yahoo Finance, per 3.3.1) rather than a pull from Yahoo Finance itself; both are free daily-OHLCV sources with no license required, so the substitution does not change the data-access argument. This window predates and is unrelated to the LOBSTER anchor day (3.4.2 Decision 1); the two real-data checks in this report are independent by design — this one exercises the regime/sweep procedure on a full percentile-scheme-sized history, the other (3.4.2 Decision 1) exercises the tick-level protocol translation — and are not required to share a period.
-
-Calibrating on 2007-04-18 to 2008-04-16 (252 trading days, `θ_vol = 0.518`, `θ_trend = 0.059`) and classifying the next 126 days — which fall in the Sept–Oct 2008 crash:
-
-| Regime | Days (of 126) |
-|---|---|
-| RANGING | 80 |
-| TRENDING | 29 |
-| VOLATILE | 17 |
-
-All three non-empty — the 3.3.3.2 non-degeneracy proof holds empirically here too. Sweeping the same 27-point grids against each regime's days, selecting by Sharpe:
-
-| Regime | Strategy | Winning parameters | Sharpe |
-|---|---|---|---|
-| TRENDING | Momentum | lookback=5, entry_thresh=0.01, pos_scalar=1.5 | **1.856** |
-| RANGING | Mean Reversion | window=20, dev_thresh=0.02, pos_scalar=0.5 | **2.077** |
-| VOLATILE | Defensive | vol_window=20, vol_cutoff=0.2, pos_scalar=0.5 | **−3.125** |
-
-VOLATILE is reported as-is: even the best of 27 candidates during a genuine crash still loses money on a risk-adjusted basis. This is not a design failure — it's exactly the situation the FS8 approval gate exists for, since the operator sees the full sweep table, not just the winning row.
-
-This run validates the procedure — determinism, non-degenerate classification, fixed tie-break, sweep-table transparency — on real data. It does **not** validate sweep runtime (Decision 3's runtime budget) or the actual PL/PS system, which doesn't exist yet.
-
----
+**FS7 determinism.** FS7 requires bit-identical re-runs, not just correct output. Every nondeterminism source is closed by construction: no RNG (no fitted model or sampling, per Decisions 2–3), strictly sequential evaluation over ordered-list grids with canonical serialization (3.3.3.7), a single designated verification host (no cross-machine float drift), and a lexicographic tie-break on equal Sharpe. Verified by running the pipeline twice on the same input and byte-comparing the output.
 
 ### 3.3.3.4 Risk Analysis and config generation
 
-A validation pass on the winning parameters, not another optimization step. Three checks: (1) did this parameter set ever breach the hard risk limits during the backtest (notional, position size, order rate — the same limits the PS enforces at runtime, 3.2.3.3)? (2) is the worst peak-to-trough loss within bounds — flagged if it exceeds $25,000 CAD, half the FS3 notional ceiling; (3) is the result backed by enough trades to be statistically meaningful — a high Sharpe from only 2 trades isn't, so anything under 10 trades is flagged. None of these checks reject automatically: a failed check is written into the operator's report, and the operator decides.
+A validation pass on the winning parameters, not another optimization step. Three checks: (1) did this parameter set ever breach the hard risk limits during the backtest (notional, position size, order rate — the same limits the PS enforces at runtime, 3.2.3.3)? (2) is the worst peak-to-trough loss within bounds — flagged if it exceeds $25,000 CAD, half the FS3 notional ceiling? (3) is the result backed by enough trades to be statistically meaningful — a high Sharpe from only 2 trades isn't, so anything under 10 trades is flagged? None of these checks reject automatically: a failed check is written into the operator's report, and the operator decides.
 
 ### 3.3.3.5 JSON configuration schema (jointly owned with 3.2.3.4)
 
-The fields of the config file the pipeline produces: which strategy and regime were selected, the parameter values, the risk limits, audit metadata on how the result was produced, and who approved it and when.
+The config file the pipeline produces records which strategy and regime were selected, the parameter values, the risk limits, audit metadata on how the result was produced, and who approved it and when.
 
 | Field | Type | Content |
 |---|---|---|
 | `strategy_id` | string | `momentum` / `mean_reversion` / `defensive` |
 | `regime_label` | string | `trending` / `ranging` / `volatile` |
-| `parameters` | object | Swept winner's values, integer-encoded to match the PS kernel. Keys per strategy — momentum: `lookback`, `entry_thresh`, `pos_scalar`; mean_reversion: `window`, `dev_thresh`, `pos_scalar`; defensive: `spread_floor`, `vol_cutoff`, `pos_scalar` (lockstep with 3.2.3.2 and the 3.3.3.3 grid axes) |
+| `parameters` | object | Swept winner's values, integer-encoded to match the PS kernel. Keys per strategy — momentum: `lookback`, `entry_thresh`, `pos_scalar`; mean_reversion: `window`, `dev_thresh`, `pos_scalar`; defensive: `spread_floor`, `pos_scalar` (lockstep with 3.2.3.2 and the 3.3.3.3 grid axes) |
 | `risk_limits` | object | `max_notional_cad`, `max_position_shares`, `max_order_rate`, each ≤ its FS3 ceiling |
 | `provenance` | object | Data window, grid hash, backtest Sharpe, pipeline version — the FS12 record embedded for audit |
 | `approval` | object | `operator_id`, `timestamp` — appended only by the approval action (3.3.3.7) |
@@ -569,7 +510,7 @@ Each stage logs entry/exit + key numbers via a shared wrapper. A failed stage em
 
 ### 3.3.3.7 Operator Approval and configuration transmission (FS8)
 
-The operator reviews the full FS12 report and approves interactively. Transmission cannot occur without that approval, not because of a check that could be skipped, but because the send call exists only inside the code path that runs after approval succeeds — there's no separate step where the code checks "was this approved?" before sending. Approving is the action that triggers sending. If nobody approves, the send call is never reached. That satisfies FS8's requirement directly, and is exactly what its verification checks for.
+The operator reviews the full FS12 report and approves interactively. Transmission cannot occur without that approval — not because of a skippable check, but because the send call exists only inside the code path that runs after approval succeeds. Approving is the action that triggers sending; if nobody approves, the send call is never reached. That satisfies FS8 directly and is exactly what its verification checks for.
 
 Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from which the Config Loader ingests it at startup.
 
@@ -583,7 +524,7 @@ Transport is a push over the PS GbE via `scp` to a staging path on the SoC, from
 | FS7 | Exhaustive fixed-order grid + deterministic vectorized kernel + total-order tie-break; all nondeterminism sources enumerated and closed (3.3.3.3) | Analytical; pending double-run byte-compare |
 | FS8 | Transmission call structurally unreachable without operator approval — the send has one caller, the approval prompt's success branch (3.3.3.7) | Pending no-approval injection test |
 | FS12 (non-ess.) | `run_stage()` wrapper logs every transition; approval report aggregates regime/sweep/Sharpe/status | Pending full-cycle log inspection |
-| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin with growth allowance (Decision 3's runtime budget and grid-scale table) | Analytical; pending reference-dataset wall-clock |
+| NFS5 (non-ess.) | ≈ 1–2 min pessimistic total vs 30 min budget; ≥ 15× margin (Decision 3's runtime budget) | Analytical; pending reference-dataset wall-clock |
 
 ---
 
