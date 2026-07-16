@@ -27,6 +27,13 @@ To run the live classification matrix demonstration for the reference target dat
 python percentile_classifier.py --input validated_ohlcv.csv --target_date 2026-06-30
 ```
 
+## Automated Unit Testing & Non-Degeneracy Verification (Task A.2)
+The subsystem includes an automated test runner (`test_regime_classifier.py`) that evaluates the pipeline's stability and distribution across a continuous 6-month tracking slice (126 trading days)[cite: 8].
+
+### How to Run the Verification Test Suite
+```bash
+python test_regime_classifier.py
+
 ---
 
 ## Downstream System Interface (Task A.4 Integration)
