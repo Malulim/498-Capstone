@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AQTA EOD Server Pipeline - Subsystem 3.3
-Task A.1a: Data Ingestion & Validation (Yahoo Finance Daily OHLCV Ingest)
+EOD Server Pipeline - Subsystem 3.3
+Data Ingestion & Validation (Yahoo Finance Daily OHLCV Ingest)
 """
 
 import sys
@@ -13,7 +13,7 @@ def ingest_historical_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.D
     """
     Downloads historical daily OHLCV data from Yahoo Finance.
     """
-    print(f"[*] [A.1a] Fetching historical OHLCV data for '{symbol}' from {start_date} to {end_date}...")
+    print(f"[*] Fetching historical OHLCV data for '{symbol}' from {start_date} to {end_date}...")
     try:
         # Download historical daily bar data (interval="1d")
         # We explicitly request 'AAPL' (or your target symbol) as specified in the design doc
@@ -36,7 +36,7 @@ def validate_ohlcv_data(df: pd.DataFrame, calibration_window_days: int) -> pd.Da
     2. Monotonic, unique timestamp indexing.
     3. Minimum history window verification: Calibration Window + 126 trading days.
     """
-    print("[*] [A.1a] Starting data validation checks...")
+    print("[*] Starting data validation checks...")
 
     # 1. Schema Check: Ensure exact expected columns exist
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -83,11 +83,11 @@ def validate_ohlcv_data(df: pd.DataFrame, calibration_window_days: int) -> pd.Da
         )
         sys.exit(1)
 
-    print("[+] [A.1a] Validation successful. Data is structurally sound.")
+    print("[+] Validation successful. Data is structurally sound.")
     return df_clean
 
 def main():
-    parser = argparse.ArgumentParser(description="AQTA Task A.1a - OHLCV Data Ingestion & Validation")
+    parser = argparse.ArgumentParser(description="OHLCV Data Ingestion & Validation")
     parser.add_argument("--symbol", type=str, default="AAPL", help="Ticker symbol to download (default: AAPL)")
     parser.add_argument("--start", type=str, default="2025-06-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default="2026-07-01", help="End date (YYYY-MM-DD)")
@@ -102,7 +102,7 @@ def main():
     
     # Save the output CSV
     validated_df.to_csv(args.output)
-    print(f"[+] [A.1a] Cleaned and validated dataset saved to: {args.output}\n")
+    print(f"[+] Cleaned and validated dataset saved to: {args.output}\n")
 
 if __name__ == "__main__":
     main()

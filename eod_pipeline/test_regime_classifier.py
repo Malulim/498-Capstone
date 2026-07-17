@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AQTA EOD Subsystem - Task A.2 Verification Test Suite
+EOD Subsystem - Verification Test Suite
 Automated Proof of Non-Degeneracy and Boundary Correctness
 """
 
@@ -49,7 +49,7 @@ def run_pipeline_validation():
     counts = pd.Series(allocated_regimes).value_counts()
     
     print("\n" + "="*50)
-    print("   AQTA TASK A.2 VERIFICATION DISTRIBUTION REPORT   ")
+    print("   VERIFICATION DISTRIBUTION REPORT   ")
     print("="*50)
     for r_type, count in counts.items():
         print(f"  - {r_type:<10} Allocation Count: {count:<4} ({count/len(test_dates)*100:.1f}%)")

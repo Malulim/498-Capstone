@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AQTA EOD Server Pipeline - Subsystem 3.3
-Task A.2: Rule-Based Percentile Regime Classifier
+EOD Server Pipeline - Subsystem 3.3
+Rule-Based Percentile Regime Classifier
 """
 
 import sys
@@ -13,7 +13,7 @@ def calculate_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Computes Realized Volatility and Trend Strength metrics from validated OHLCV close data.
     """
-    print("[*] [A.2] Processing mathematical feature extraction arrays...")
+    print("[*] Processing mathematical feature extraction arrays...")
     
     # Ensure sorting order is safe
     df = df.sort_index()
@@ -64,7 +64,7 @@ def classify_market_regime(df: pd.DataFrame, target_date_str: str) -> str:
     vol_threshold = np.percentile(history_df['Realized_Vol'], 75)
     trend_threshold = np.percentile(history_df['Trend_Strength'].abs(), 60)
 
-    print(f"\n[*] [A.2] Running classification matrix for date: {target_date}")
+    print(f"\n[*] Running classification matrix for date: {target_date}")
     print(f"    - Current Volatility: {sigma_today:.4f} (Threshold 75th: {vol_threshold:.4f})")
     print(f"    - Current Absolute Trend: {t_today_abs:.4f} (Threshold 60th: {trend_threshold:.4f})")
 
@@ -76,12 +76,12 @@ def classify_market_regime(df: pd.DataFrame, target_date_str: str) -> str:
     else:
         regime = "RANGING"
 
-    print(f"[+] [A.2] Identified Market Regime Allocation: {regime}")
+    print(f"[+] Identified Market Regime Allocation: {regime}")
     return regime
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AQTA Task A.2 - Percentile Regime Classifier")
+    parser = argparse.ArgumentParser(description="Percentile Regime Classifier")
     parser.add_argument("--input", type=str, default="validated_ohlcv.csv", help="Input path of validated daily bars")
     parser.add_argument("--target_date", type=str, required=True, help="The session day to evaluate (YYYY-MM-DD)")
     
@@ -92,7 +92,7 @@ def main():
         raw_data = pd.read_csv(args.input, index_col=0)
         raw_data.index = pd.to_datetime(raw_data.index, utc=True)
     except FileNotFoundError:
-        print(f"[-] ERROR: Could not locate ingestion file '{args.input}'. Run step A.1a first.", file=sys.stderr)
+        print(f"[-] ERROR: Could not locate ingestion file '{args.input}'. Run ingest_validate_eod.py first.", file=sys.stderr)
         sys.exit(1)
 
     # Calculate indicators
