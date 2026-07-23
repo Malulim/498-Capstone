@@ -1,7 +1,8 @@
 #include "strategy_engine.h"
-#include "config_loader.h" // @cye: from @lucy
-#include "market_data.h"   // @cye: from @lucy
-#include "order_execution.h" // @cye: from @lucy
+#include "risk_guard.h"
+#include "config_loader.h" // @cye: from @lucy  => Config Loader: get risk params from config (from EOD)
+#include "market_data.h"   // @cye: from @lucy  => Snapshot Poller: get snapshot/market data (from PL)
+#include "order_execution.h" // @cye: from @lucy => Order writer(partial): provide execution order (to PL)
 
 static RollingState rolling_state;
 static OrderTable order_table;
