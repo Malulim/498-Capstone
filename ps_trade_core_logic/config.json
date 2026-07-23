@@ -1,0 +1,19 @@
+{
+  "strategy_id": "momentum",
+  "regime_label": "trending",
+  "parameters": {
+    "lookback": 5,
+    "window": 20,
+    "entry_thresh": 0.01,
+    "dev_thresh": 0.02,
+    "spread_floor": 2,
+    "base_lot": 100,
+    "pos_scalar": 1.0
+  },
+  "risk_limits": {
+    "max_notional_cad": 50000,
+    "max_position_shares": 1000,
+    "max_order_rate": 1000,
+    "max_in_flight": 100
+  }
+}
