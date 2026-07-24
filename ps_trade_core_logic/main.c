@@ -3,6 +3,7 @@
 #include "config_loader.h" // @cye: from @lucy  => Config Loader: get risk params from config (from EOD)
 #include "market_data.h"   // @cye: from @lucy  => Snapshot Poller: get snapshot/market data (from PL)
 #include "order_execution.h" // @cye: from @lucy => Order writer(partial): provide execution order (to PL)
+#include "order_table.h"
 
 static RollingState rolling_state;
 static OrderTable order_table;
@@ -21,12 +22,12 @@ int main() {
         if (decision.side != HOLD) {
             int risk_check = risk_guard_check(&risk_params, position, &decision, order_table.in_flight_count);
             if (risk_check == 0) {
-                // TODO: insert_order_into_table(&order_table, order_id, decision);
-                execute_order(decision, order_id); // @cye: reach maximum?
-                //position += (decision.side == BUY ? decision.qty : -decision.qty); @cye: move to clean order
+                ++order_id; // README 3.1.3.4: increment before assign, counter starts at 0
+                insert_order_into_table(&order_table, order_id, decision);
+                execute_order(decision, order_id);
             }
         }
-        // TODO: clean_order_in_table(&order_table); // @cye: clean filled orders
+        clean_order_in_table(&order_table, &position); // updates position once T elapses (README 3.2.3.3)
     }
     return 0;
 }

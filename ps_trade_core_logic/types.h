@@ -46,7 +46,7 @@ typedef struct {
     unsigned int max_in_flight_orders;  // @cye: 不在 config schema(625 行)的 risk_limits 列表里——FS3 说 in-flight 上限是硬顶(100)，但文档没写这个数字本身能不能被 config 收紧，需要跟队友确认这个字段到底该不该从 JSON 读
 } RiskParams;
 
-typedef enum { EMPTY, IN_FLIGHT, FILLED } OrderState;
+typedef enum { EMPTY, IN_FLIGHT } OrderState;
 
 typedef struct {
     unsigned int    order_id;

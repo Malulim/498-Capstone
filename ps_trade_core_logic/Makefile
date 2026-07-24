@@ -1,7 +1,7 @@
 # PS trade core: @cye's engine/risk + @lucy's config/market/order
 CC     = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11
-SRC    = main.c strategy_engine.c risk_guard.c config_loader.c market_data.c order_execution.c
+SRC    = main.c strategy_engine.c risk_guard.c config_loader.c market_data.c order_execution.c order_table.c
 BIN    = ps_core
 
 # Cross-platform clean/run: Windows (cmd from mingw32-make) vs Unix (board).

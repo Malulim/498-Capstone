@@ -11,6 +11,7 @@ PS 侧 intraday 交易循环。`main.c` 是 Core 1 热路径主循环:
 | `order_execution.c/.h` | Table 7 订单编码 | FS11 | @lucy |
 | `strategy_engine.c/.h` | 策略引擎 | FS2 | @cye |
 | `risk_guard.c/.h` | 风控 | FS3 | @cye |
+| `order_table.c/.h` | in-flight 订单表 insert/clean | FS12 | @cye |
 | `main.c` / `types.h` | 主循环 + 数据结构 | — | @cye |
 
 ## Demo on Windows (PowerShell)
@@ -31,7 +32,7 @@ make                  # PetaLinux rootfs 需装 gcc/make,或用交叉编译
 ```bash
 gcc -Wall -Wextra -O2 -std=c11 -o ps_core \
     main.c strategy_engine.c risk_guard.c \
-    config_loader.c market_data.c order_execution.c -lm
+    config_loader.c market_data.c order_execution.c order_table.c -lm
 ```
 
 ## 说明
