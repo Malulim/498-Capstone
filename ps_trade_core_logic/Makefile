@@ -2,6 +2,7 @@
 CC     = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11
 SRC    = main.c strategy_engine.c risk_guard.c config_loader.c market_data.c order_execution.c order_table.c
+HDR    = safety_limits.h
 BIN    = ps_core
 
 # Cross-platform clean/run: Windows (cmd from mingw32-make) vs Unix (board).
@@ -15,7 +16,7 @@ else
     RUN = ./$(BIN)
 endif
 
-$(EXE): $(SRC)
+$(EXE): $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -o $(EXE) $(SRC) -lm
 
 run: $(EXE)
