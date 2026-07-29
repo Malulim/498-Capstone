@@ -75,7 +75,12 @@ typedef struct {
 
 typedef struct {
     OrderEntry   orders[100];
-    unsigned int in_flight_count;
+    /* 两个"在途"量，别混：
+     *   in_flight_orders  = 在途订单条数，对应 max_in_flight（表深度）
+     *   in_flight_net_qty = 在途订单的带方向股数之和，BUY 加 SELL 减，
+     *                       对应 max_position_shares（仓位敞口） */
+    unsigned int in_flight_orders;
+    int          in_flight_net_qty;
 } OrderTable;
 
 typedef Decision (*StrategyFunc)(const Snapshot *snap, RollingState *state, int position, const StrategyParams *params);

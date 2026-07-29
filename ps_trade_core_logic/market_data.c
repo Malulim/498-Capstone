@@ -33,14 +33,32 @@ static int rand_range(int lo, int hi) {
     return lo + (int)(next_rand() % (unsigned)(hi - lo + 1));
 }
 
-/* Five phases, each driving a different branch of the trading loop. */
+/* Five market regimes. The feed states the regime; what the strategy does with
+ * it is the strategy's business, not something this file asserts. */
 static int phase_of(unsigned int i) {
     unsigned int pct = (i * 100u) / MARKET_DATA_MAX_TICKS;
-    if (pct < 15) return 0;   /* warmup ranging  -> cold start + HOLD */
-    if (pct < 40) return 1;   /* uptrend         -> BUY */
-    if (pct < 60) return 2;   /* downtrend       -> SELL */
-    if (pct < 75) return 3;   /* choppy ranging  -> HOLD */
-    return 4;                 /* parabolic rally -> notional rejects */
+    if (pct < 15) return 0;   /* warmup ranging */
+    if (pct < 40) return 1;   /* uptrend */
+    if (pct < 60) return 2;   /* downtrend */
+    if (pct < 75) return 3;   /* choppy ranging */
+    return 4;                 /* parabolic rally */
+}
+
+static const char *PHASE_BANNER[5] = {
+    "PHASE 0  WARMUP RANGING   mid +-6c/tick        spread 1-3c",
+    "PHASE 1  UPTREND          mid +10..45c/tick    spread 2-5c",
+    "PHASE 2  DOWNTREND        mid -45..-10c/tick   spread 2-5c",
+    "PHASE 3  CHOPPY RANGING   mid +-8c/tick        spread 1-2c",
+    "PHASE 4  PARABOLIC RALLY  mid +200..600c/tick  spread 4-12c",
+};
+
+/* Banner on phase change so the log says what regime the feed is now in. */
+static void log_phase(unsigned int i) {
+    static int last = -1;
+    int p = phase_of(i);
+    if (p == last) return;
+    last = p;
+    printf("\n===== %s =====\n", PHASE_BANNER[p]);
 }
 
 /* Mid price in integer cents: per-phase trend plus bounded noise. */
@@ -59,8 +77,8 @@ static int mid_at(unsigned int i) {
     return mid;
 }
 
-/* Spread widens when volatile, tightens when calm. Reaches 1 cent (below the
- * default spread_floor of 2) so Defensive's spread gate can go both ways. */
+/* Spread widens when volatile, tightens when calm. Ranges from 1 to 12 cents,
+ * i.e. both sides of the default spread_floor of 2. */
 static int spread_at(unsigned int i) {
     switch (phase_of(i)) {
         case 0:  return rand_range(1, 3);
@@ -84,6 +102,7 @@ Snapshot get_snapshot_from_market_data(void) {
     }
 
     unsigned int i = emitted++;
+    log_phase(i);
     int mid    = mid_at(i);
     int spread = spread_at(i);
 

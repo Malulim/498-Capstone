@@ -3,6 +3,7 @@ CC     = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c11
 SRC    = main.c strategy_engine.c risk_guard.c config_loader.c market_data.c order_execution.c order_table.c
 BIN    = ps_core
+LOG    = session.log
 
 # Cross-platform clean/run: Windows (cmd from mingw32-make) vs Unix (board).
 ifeq ($(OS),Windows_NT)
@@ -21,7 +22,12 @@ $(EXE): $(SRC)
 run: $(EXE)
 	$(RUN)
 
-clean:
-	-$(RM) $(BIN) $(BIN).exe
+# Session log instead of console. *.log is gitignored.
+log: $(EXE)
+	$(RUN) > $(LOG) 2>&1
+	@echo "session written to $(LOG)"
 
-.PHONY: run clean
+clean:
+	-$(RM) $(BIN) $(BIN).exe $(LOG)
+
+.PHONY: run log clean

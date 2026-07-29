@@ -16,13 +16,20 @@ int main() {
     StrategyParams strategy_params = get_strategy_params_from_config();
     int active_strategy_id = get_active_strategy_id_from_config();
 
+    /* FILL 行的读法，一次性说明，免得 net / position 两个数看不出关系 */
+    printf("[i] 读法: exposure = settled + pending，与 max_position_shares(%u) 比较\n"
+           "[i]        settled=已成交仓位  pending=在途未成交净股数  orders=在途单数\n",
+           risk_params.max_position_shares);
+
     int position = 0;
     unsigned int order_id = 0;
     while (1) {
         Snapshot snap = get_snapshot_from_market_data();
         Decision decision = strategy_engine_tick(&snap, &rolling_state, position, active_strategy_id, &strategy_params);
         if (decision.side != HOLD) {
-            RiskReject risk_check = risk_guard_check(&risk_params, position, &decision, order_table.in_flight_count);
+            RiskReject risk_check = risk_guard_check(&risk_params, position, &decision,
+                                                     order_table.in_flight_net_qty,
+                                                     order_table.in_flight_orders);
             if (risk_check != RISK_OK) {
                 report_reject(&decision, risk_check);
             } else {
@@ -42,8 +49,13 @@ int main() {
         // end of the lifetime of an order
         int filled = clean_order_in_table(&order_table, &position); // updates position once T elapses (README 3.2.3.3)
         if (filled > 0) {
-            printf("[*] FILL  x%-2d in_flight=%3u position=%5d\n",
-                   filled, order_table.in_flight_count, position);
+            /* 加法写在行里：settled + pending = exposure，就是风控查的那个数 */
+            printf("[*] FILL x%-2d  settled=%+6d  pending=%+6d (%3u orders)"
+                   "  ->  exposure=%+6d /%5u\n",
+                   filled, position, order_table.in_flight_net_qty,
+                   order_table.in_flight_orders,
+                   position + order_table.in_flight_net_qty,
+                   risk_params.max_position_shares);
         }
     }
     return 0;
