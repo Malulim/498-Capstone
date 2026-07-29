@@ -21,3 +21,4 @@ Thumbs.db
 
 # Ignore simulation output directories
 pl/tx_logic/sim/
+Exchange_simulator/build/

@@ -1,4 +1,5 @@
 #include "config_loader.h"
+#include "safety_limits.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,12 +8,6 @@
 #ifndef CONFIG_PATH
 #define CONFIG_PATH "config.json"
 #endif
-
-/* FS3 hard ceilings. A config may tighten these, never exceed them. */
-#define FS3_MAX_NOTIONAL_CAD    50000u
-#define FS3_MAX_POSITION_SHARES 1000u
-#define FS3_MAX_ORDER_RATE      1000u
-#define FS3_MAX_IN_FLIGHT       100u
 
 static StrategyParams g_strategy;
 static RiskParams     g_risk;
