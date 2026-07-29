@@ -207,6 +207,8 @@ The TX subsystem is the right-to-left PL order-egress lane in *Figure 2*. It sta
 
 1.  **Order Register Write:** PS writes the approved order fields through AXI-Lite, checks TX_READY, and writes DOORBELL last.
 
+    > **@cye: 7月28日更新** — 检查 TX_READY 是 PS 的**强制义务**,不是建议。PL 侧的 Order Field Latch 在上一帧尚未发送完毕时,会**静默丢弃**新到达的 DOORBELL 脉冲:不排队、不补发、不产生任何通知或错误标志。这是硬件层面的兜底设计(防止正在发送的帧被半路篡改),但它意味着 PS 若跳过 TX_READY 检查就写 DOORBELL,该笔订单会凭空消失——而 PS 侧已经写入了 decision record、并将订单登记进 in-flight 表(3.2.3.3),造成 FS12 要求的 in-flight 状态跟踪与线上实际发送情况不一致。因此 PS 的 egress 路径必须先读 0x54 TX_READY、确认为 1 之后才写 0x50 DOORBELL。
+
 2.  **Order Field Latch:** PL samples the order fields triggered by DOOLBELL, creating stable order commands.
 
 3.  **Custom Payload Build:** The latched fields are packed into the fixed-format FS11 order payload defined in *Table 7* below.
