@@ -98,9 +98,11 @@ PS ─────────────────────────�
 
 | 信号 | 位宽 | 方向(frame_builder 视角) | 说明 |
 |---|---|---|---|
-| `cmd_valid` | 1 | in | 1 拍脉冲。只会在 `frame_builder_busy == 0` 时出现——latcher 屏蔽了忙碌期到达的 doorbell,所以 frame_builder 不需要反过来给一根 ready 拒绝命令。**前提是 `frame_builder_busy` 组合拉高,见下** |
+| `cmd_valid` | 1 | in | 1 拍脉冲,是 `doorbell_pulse & !frame_builder_busy` 的**寄存器**输出(比 doorbell 晚 1 拍,见下)。latcher 已屏蔽忙碌期到达的 doorbell,所以 frame_builder 不需要反过来给一根 ready 拒绝命令,**收到 `cmd_valid` 就无条件起帧** |
 | `cmd_order_id/symbol/side/qty/price` | 32/16/8/32/32 | in | latcher 在整个忙碌窗口内保持不变,frame_builder 直接读,不需要自己复制一份 |
 | `frame_builder_busy` | 1 | out(回 latcher) | **必须在 `cmd_valid` 的同一拍组合地拉高**,保持到整帧最后一个字节握手完成。如果做成寄存器输出(晚一拍拉高),落在这一拍空隙里的 doorbell 会穿过 latcher 的屏蔽,把正在发送的 `cmd_*` 改掉 |
+
+**`cmd_valid` 必须是寄存器输出,不能写成组合。**因为 `frame_builder_busy` 要求组合地由 `cmd_valid` 拉起来,如果 `cmd_valid` 也组合地等于 `doorbell_pulse & !frame_builder_busy`, 两条要求合起来就是 `cmd_valid = doorbell & !(active | cmd_valid)`,在 `doorbell=1`、`active=0` 时化简成 `cmd_valid = !cmd_valid`——一个真会震荡的组合环。晚一拍不影响正确性 (第 N 拍接受、第 N+1 拍 `cmd_valid` 与 `busy` 同时拉高,落在 N+1 的下一个 doorbell 照样被挡住),也不影响性能(FS3 是 1000 笔/秒,125 MHz 下多一拍无感)。
 
 **TX_READY 和忙碌屏蔽是互补的两层,不是同一件事的两种说法:**
 
@@ -164,7 +166,7 @@ PS ─────────────────────────�
 | 模块 | 分类 | 理由 |
 |---|---|---|
 | `axi_lite_regbank` | ② | AXI-Lite 的 AW/W 是独立通道,协议不保证 AWVALID 和 WVALID 同拍到达,slave 必须跨拍记住"地址到了,还在等数据"——这就排除了 ①。等两者到齐本身是条件驱动的,所以实际上更接近一个只迭代一次的 ③,但无论如何是个小顺序 FSM,不是纯组合 |
-| `tx_order_latcher` | ① | `doorbell_pulse` 和 `frame_builder_busy` 都是持续驱动、同拍可得的信号,不存在"这一拍只到了一半信息"的情况。`cmd_valid = doorbell_pulse & !frame_builder_busy` 和 `cmd_*` 的捕获(clock-enable = `cmd_valid`)都在一个时钟边沿内解决。**不需要 FSM** |
+| `tx_order_latcher` | ① | `doorbell_pulse` 和 `frame_builder_busy` 都是持续驱动、同拍可得的信号,不存在"这一拍只到了一半信息"的情况。接受判断 `accept = doorbell_pulse & !frame_builder_busy` 和 `cmd_*` 的捕获(clock-enable = `accept`)都在一个时钟边沿内解决,`cmd_valid` 是 `accept` 的寄存器版(理由见接口 ②)。**不需要 FSM,没有跨拍状态** |
 | `tx_frame_builder` | ③ | 58 字节内容 / 每拍 1 字节的接口,数据量本身就排除 ①。实际需要多少拍取决于 `m_axis_tready` 拉低多久——这是每拍重新检验的外部条件,不是设计期固定的步数,所以排除 ② 落入 ③:一个只在 `tready` 成立时推进的字节计数器 |
 
 `tx_frame_builder` 内部还有一个**未定的实现选择**(由实现者决定):
