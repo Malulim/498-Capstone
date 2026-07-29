@@ -3,7 +3,8 @@
 ## Prerequisites
 Ensure you have Python 3.11+ installed and the required package dependencies configured inside your virtual environment:
 ```bash
-pip install pandas numpy yfinance
+python -m pip install -r eod_pipeline/requirements.txt
+python -m pip install yfinance
 ```
 
 ---
@@ -33,8 +34,83 @@ The subsystem includes an automated test runner (`test_regime_classifier.py`) th
 ### How to Run the Verification Test Suite
 ```bash
 python test_regime_classifier.py
+```
 
 ---
 
-## Downstream System Interface (Task A.4 Integration)
-The terminal string output from this subsystem (`VOLATILE`, `TRENDING`, or `RANGING`) maps directly to the downstream integration thread.
+## Backtest Data Health Check
+
+After the Exchange Simulator generates `expected_book.csv` and
+`frame_timings.csv`, inspect whether the configured grids are suitable for the
+data:
+
+```bash
+.venv/bin/python -m eod_pipeline.tools.data_health_check
+```
+
+The report is written to `eod_pipeline/reports/data_health_check.md`.
+
+## Configuration
+
+`eod_pipeline/config/eod_settings.json` defines the strategy grids, `base_lot`,
+risk limits, and operator-review thresholds. JSON may tighten the compile-time
+PS risk ceilings, but cannot raise them.
+
+## Backtest and Parameter Sweep
+
+Run a deterministic sweep from the repository root:
+
+```bash
+.venv/bin/python -m eod_pipeline.run_sweep \
+  --regime trending \
+  --expected-book Exchange_simulator/build/expected_book.csv \
+  --timing Exchange_simulator/build/frame_timings.csv \
+  --output eod_pipeline/output/sweep_result.json \
+  --print-winner
+```
+
+Regime mapping:
+
+- `trending` → Momentum, 27 candidates
+- `ranging` → Mean Reversion, 27 candidates
+- `volatile` → Defensive, 9 candidates; currently HOLD-only and
+  `NOT_OPTIMIZED`
+
+The sweep ranks candidates by annualized Sharpe and also reports total P&L,
+tick-level maximum drawdown, trade activity, and risk checks. Internal P&L uses
+exact half-cent integers; readable CAD values are included in the winner.
+Identical inputs and pinned dependencies produce identical output.
+
+## Risk Review and Human Approval
+
+Review the sweep winner and generate a PS-compatible candidate:
+
+```bash
+.venv/bin/python -m eod_pipeline.run_approval \
+  --operator-id hanyu \
+  --sweep-result eod_pipeline/output/sweep_result.json \
+  --settings eod_pipeline/config/eod_settings.json
+```
+
+Optional per-run review thresholds:
+
+```bash
+  --max-drawdown-warning-cad 20000 --min-trades 20
+```
+
+Approval rules:
+
+- warnings: `ACKNOWLEDGE WARNINGS`, then `APPROVE`
+- `NOT_OPTIMIZED`: `OVERRIDE NOT_OPTIMIZED`, then `APPROVE`
+- rejection: `REJECT`, followed by a non-empty reason
+
+Artifacts are retained under
+`eod_pipeline/output/approval_runs/<UTC-run-id>/`. Each run contains the
+candidate, operator reports, stage log, and either an approved config or a
+rejection record. The CLI only writes local files; real `scp` is not enabled.
+
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -s eod_pipeline -p 'test_*.py'
+```
