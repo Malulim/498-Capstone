@@ -102,7 +102,7 @@ PS ─────────────────────────�
 | `cmd_order_id/symbol/side/qty/price` | 32/16/8/32/32 | in | latcher 在整个忙碌窗口内保持不变,frame_builder 直接读,不需要自己复制一份 |
 | `frame_builder_busy` | 1 | out(回 latcher) | **必须在 `cmd_valid` 的同一拍组合地拉高**,保持到整帧最后一个字节握手完成。如果做成寄存器输出(晚一拍拉高),落在这一拍空隙里的 doorbell 会穿过 latcher 的屏蔽,把正在发送的 `cmd_*` 改掉 |
 
-**`cmd_valid` 必须是寄存器输出,不能写成组合。**因为 `frame_builder_busy` 要求组合地由 `cmd_valid` 拉起来,如果 `cmd_valid` 也组合地等于 `doorbell_pulse & !frame_builder_busy`, 两条要求合起来就是 `cmd_valid = doorbell & !(active | cmd_valid)`,在 `doorbell=1`、`active=0` 时化简成 `cmd_valid = !cmd_valid`——一个真会震荡的组合环。晚一拍不影响正确性 (第 N 拍接受、第 N+1 拍 `cmd_valid` 与 `busy` 同时拉高,落在 N+1 的下一个 doorbell 照样被挡住),也不影响性能(FS3 是 1000 笔/秒,125 MHz 下多一拍无感)。
+**`cmd_valid` 必须是寄存器输出,不能写成组合。**因为 `frame_builder_busy` 要求组合地由 `cmd_valid` 拉起来,如果 `cmd_valid` 也组合地等于 `doorbell_pulse & !frame_builder_busy`, 两条要求合起来就是 `cmd_valid = doorbell & !(active | cmd_valid)`,在 `doorbell=1`、`active=0` 时化简成 `cmd_valid = !cmd_valid`——一个非法组合反馈环,仿真可能不收敛或产生 `X`,综合/时序工具也会报告 combinational loop。晚一拍不影响正确性 (第 N 拍接受、第 N+1 拍 `cmd_valid` 与 `busy` 同时拉高,落在 N+1 的下一个 doorbell 照样被挡住),也不影响性能(FS3 是 1000 笔/秒,125 MHz 下多一拍无感)。
 
 **TX_READY 和忙碌屏蔽是互补的两层,不是同一件事的两种说法:**
 
@@ -166,7 +166,7 @@ PS ─────────────────────────�
 | 模块 | 分类 | 理由 |
 |---|---|---|
 | `axi_lite_regbank` | ② | AXI-Lite 的 AW/W 是独立通道,协议不保证 AWVALID 和 WVALID 同拍到达,slave 必须跨拍记住"地址到了,还在等数据"——这就排除了 ①。等两者到齐本身是条件驱动的,所以实际上更接近一个只迭代一次的 ③,但无论如何是个小顺序 FSM,不是纯组合 |
-| `tx_order_latcher` | ① | `doorbell_pulse` 和 `frame_builder_busy` 都是持续驱动、同拍可得的信号,不存在"这一拍只到了一半信息"的情况。接受判断 `accept = doorbell_pulse & !frame_builder_busy` 和 `cmd_*` 的捕获(clock-enable = `accept`)都在一个时钟边沿内解决,`cmd_valid` 是 `accept` 的寄存器版(理由见接口 ②)。**不需要 FSM,没有跨拍状态** |
+| `tx_order_latcher` | ④ | 接受判断 `accept = doorbell_pulse & !frame_builder_busy` 在当前拍完成；`cmd_valid` 和 `cmd_*` 在时钟边沿一起更新并跨拍保持。它有输出寄存器状态,但没有 FSM 或订单队列 |
 | `tx_frame_builder` | ③ | 58 字节内容 / 每拍 1 字节的接口,数据量本身就排除 ①。实际需要多少拍取决于 `m_axis_tready` 拉低多久——这是每拍重新检验的外部条件,不是设计期固定的步数,所以排除 ② 落入 ③:一个只在 `tready` 成立时推进的字节计数器 |
 
 `tx_frame_builder` 内部还有一个**未定的实现选择**(由实现者决定):
@@ -206,6 +206,20 @@ VIP/BFM**——一个三十行的 SV task 完成一次写事务就够了。不�
       安全不变量,这一条比其他所有用例加起来都重要
 - [ ] `tx_ready` 始终等于 `!frame_builder_busy`
 - [ ] 复位:`cmd_valid` 为 0
+
+当前模块没有 pending buffer 或 FIFO。busy 时到达的 doorbell 会被直接丢弃；需要重试时, 由 PS 重新读取 `TX_READY` 并提交新的 doorbell。
+
+从 `pl/tx_logic/` 运行 lint 和自检查 testbench:
+
+```bash
+verilator --lint-only --Wall tx_order_latcher.sv
+
+verilator --binary --timing --assert --Wall \
+  --top-module tb_tx_order_latcher \
+  --Mdir sim/tx_order_latcher \
+  tx_order_latcher.sv tb/tb_tx_order_latcher.sv
+./sim/tx_order_latcher/Vtb_tx_order_latcher
+```
 
 ### `tx_frame_builder`
 
