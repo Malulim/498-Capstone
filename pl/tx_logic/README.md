@@ -244,11 +244,11 @@ Python oracle 对 Table 7 的理解**从构造上就一致**,不会出现两边�
 
 | # | 任务 | 依赖 | Owner |
 |---|---|---|---|
-| 1 | `axi_lite_regbank` 实现 + 单元测试 | 无 | TBD |
-| 2 | `tx_order_latcher` 实现 + 单元测试 | 无 | TBD |
-| 3 | `tx_frame_builder` 实现 + 单元测试 | 无 | TBD |
-| 4 | Python golden frame 生成脚本 | 无 | TBD |
-| 5 | 集成测试 testbench | 1、2、3、4 | TBD |
+| 1 | `axi_lite_regbank` 实现 + 单元测试 | 无 | lucy |
+| 2 | `tx_order_latcher` 实现 + 单元测试 | 无 | hanyu |
+| 3 | `tx_frame_builder` 实现 + 单元测试 | 无 | panzy |
+| 4 | Python golden frame 生成脚本 | 无 | ashley |
+| 5 | 集成测试 testbench | 1、2、3、4 | lucy |
 
 1、2、3 之间没有依赖,接口已经锁死,可以并行开工。
 
