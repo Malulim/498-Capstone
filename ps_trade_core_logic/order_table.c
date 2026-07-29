@@ -22,9 +22,10 @@ int insert_order_into_table(OrderTable *table, unsigned int order_id, Decision d
     return 1;
 }
 
-void clean_order_in_table(OrderTable *table, int *position) {
+int clean_order_in_table(OrderTable *table, int *position) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
+    int filled = 0;
 
     for (int i = 0; i < ORDER_TABLE_SIZE; i++) {
         OrderEntry *entry = &table->orders[i];
@@ -37,5 +38,7 @@ void clean_order_in_table(OrderTable *table, int *position) {
         *position += (entry->side == BUY) ? (int)entry->qty : -(int)entry->qty;
         entry->state = EMPTY;
         table->in_flight_count--;
+        filled++;
     }
+    return filled;
 }

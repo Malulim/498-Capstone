@@ -3,7 +3,8 @@
 
 #include "types.h"
 
-int risk_guard_check(const RiskParams *risk_params,
+/* Returns RISK_OK (0) if the order passes, else which limit rejected it. */
+RiskReject risk_guard_check(const RiskParams *risk_params,
                      int          position,
                      const Decision    *decision,
                     unsigned int in_flight_count);

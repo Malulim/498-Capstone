@@ -14,7 +14,7 @@ static Decision momentum_strategy(const Snapshot *snap, RollingState *state, int
     int idx = (state->write_idx - params->lookback_ticks + RING_SIZE) % RING_SIZE;
     int mid_past = state->mid_ring[idx];
 
-    int qty = params->base_lot*params->pos_scalar;
+    int qty = params->base_lot * params->pos_scalar;
 
     Side side; int price;
     int delta = mid_now - mid_past;
@@ -37,9 +37,9 @@ static Decision mean_reversion_strategy(const Snapshot *snap, RollingState *stat
         int idx = (state->write_idx - i + RING_SIZE) % RING_SIZE;
         sum += state->mid_ring[idx];
     }
-    double ma = (double)sum / params->window;
+    float ma = (float)sum / params->window;
 
-    double dev = (mid_now - ma) / ma;
+    float dev = (float)(mid_now - ma) / ma;
 
     Side side; int price;
     int qty = params->base_lot * params->pos_scalar * MIN(1, fabs(dev) / params->dev_thresh);
@@ -53,7 +53,20 @@ static Decision mean_reversion_strategy(const Snapshot *snap, RollingState *stat
 }
 
 static Decision defensive_strategy(const Snapshot *snap, RollingState *state, int position, const StrategyParams *params) {
-    return HOLD_DECISION;
+    if (position == 0) return HOLD_DECISION;
+
+    int spread = snap->best_ask_price - snap->best_bid_price;
+    int abs_position = position > 0 ? position : -position;
+    int qty = MIN(abs_position, params->base_lot * params->pos_scalar);
+
+    Side side; int price;
+    if (spread >= params->spread_floor && position > 0) {
+        side = SELL; price = snap->best_bid_price; }
+    else if (spread >= params->spread_floor && position < 0) {
+        side = BUY; price = snap->best_ask_price; }
+    else { return HOLD_DECISION; }
+
+    return (Decision){side, qty, price};
 }
 
 static StrategyFunc strategy_table[] = {

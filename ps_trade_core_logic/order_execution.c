@@ -27,7 +27,7 @@ int encode_order(const Decision *decision, unsigned int order_id, unsigned char 
 
     /* order_id@0 symbol@4 side@6 qty@7 price@11 pad@15 */
     put_u32_le(out + 0,  order_id);
-    put_u16_le(out + 4,  ORDER_SYMBOL);
+    put_u16_le(out + 4,  AAPL_SYMBOL_ID);
     out[6] = side_byte;
     put_u32_le(out + 7,  decision->qty);
     put_u32_le(out + 11, decision->price);
@@ -36,16 +36,44 @@ int encode_order(const Decision *decision, unsigned int order_id, unsigned char 
 }
 
 void execute_order(Decision decision, unsigned int order_id) {
+    /* pkt = the 16-byte Table 7 packet. Nothing transmits it yet. */
     unsigned char pkt[ORDER_PACKET_BYTES];
     if (encode_order(&decision, order_id, pkt) != 0) {
         printf("[-] TX skip: order %u has invalid fields\n", order_id);
         return;
     }
 
-    printf("[+] TX id=%u sym=%d %s qty=%u px=%.2f  [",
-           order_id, ORDER_SYMBOL,
+    // @cye: 定宽格式符让小数点和 ID 对齐（7月24日 practice demo 上 Bill 的建议）
+    printf("[+] TX id=%05u sym=%s(%d) %s qty=%5u px=%8.2f\n",
+           order_id, AAPL_SYMBOL_NAME, AAPL_SYMBOL_ID,
            decision.side == BUY ? "BUY " : "SELL",
            decision.qty, decision.price / 100.0);
+
+    /* Raw Table 7 hex dump -- too noisy for the demo, re-enable to check byte layout.
+    printf("  [");
     for (int i = 0; i < ORDER_PACKET_BYTES; i++) printf("%02x", pkt[i]);
     printf("]\n");
+    */
+}
+
+void report_hold(const Snapshot *snap) {
+    printf("[=] HOLD  bid=%8.2f ask=%8.2f\n",
+           snap->best_bid_price / 100.0, snap->best_ask_price / 100.0);
+}
+
+static const char *reject_reason_text(RiskReject reason) {
+    switch (reason) {
+        case RISK_NOTIONAL:  return "notional";
+        case RISK_POSITION:  return "position";
+        case RISK_RATE:      return "rate";
+        case RISK_IN_FLIGHT: return "in-flight";
+        default:             return "unknown";
+    }
+}
+
+void report_reject(const Decision *decision, RiskReject reason) {
+    printf("[-] REJECT      %s qty=%5u px=%8.2f  reason=%s\n",
+           decision->side == BUY ? "BUY " : "SELL",
+           decision->qty, decision->price / 100.0,
+           reject_reason_text(reason));
 }

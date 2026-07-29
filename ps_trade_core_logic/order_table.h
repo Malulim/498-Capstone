@@ -18,7 +18,8 @@
 int insert_order_into_table(OrderTable *table, unsigned int order_id, Decision decision);
 
 /* Sweep the table for IN_FLIGHT orders older than FILL_DELAY_SEC, apply their
- * fill to *position, and free their slot back to EMPTY. */
-void clean_order_in_table(OrderTable *table, int *position);
+ * fill to *position, and free their slot back to EMPTY. Returns how many
+ * orders filled, so the caller can log the position change. */
+int clean_order_in_table(OrderTable *table, int *position);
 
 #endif

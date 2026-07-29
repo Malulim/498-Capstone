@@ -12,7 +12,7 @@ In the essential prototype, the PL performs market-data ingestion, protocol deco
 
 The secondary objective is an End-of-Day (EOD) optimization pipeline: it classifies the next trading day's market regime from historical data, searches a bounded parameter space for that regime's optimal strategy configuration, and backtests the selected configuration before presenting it to a human operator for approval. Only an approved configuration is loaded for the next trading session.
 
-**Prototype Scope and Constraints** The prototype is bounded to one simulated exchange and one equity symbol, and defines a fixed-width binary custom protocol for market data and order messages to keep the PL-side decoder minimal and deterministic. It targets paper trading and simulation only, not a live brokerage account. Together, these constraints remove financial risk, multi-venue complexity, and live-protocol dependencies, keeping the project focused on deterministic hardware/software partitioning.
+**Prototype Scope and Constraints** The prototype is bounded to one simulated exchange and one equity symbol, Apple Inc. (NASDAQ: AAPL, numeric symbol ID 1), and defines a fixed-width binary custom protocol for market data and order messages to keep the PL-side decoder minimal and deterministic. It targets paper trading and simulation only, not a live brokerage account. Together, these constraints remove financial risk, multi-venue complexity, and live-protocol dependencies, keeping the project focused on deterministic hardware/software partitioning.
 
 ## 1.3 Block Diagram
 
@@ -236,7 +236,7 @@ The RX and TX paths use fixed-width binary contracts so the PL logic and host-si
 | Field | Bit offset | Width (bits) | Protocol Encoding & Meaning |
 |:---|:---|:---|:---|
 | msg_type | 0 | 8 | 0x01 = Add, 0x02 = Modify, 0x03 = Delete |
-| symbol | 8 | 16 | Numeric symbol identifier for single equity (constant = 1) |
+| symbol | 8 | 16 | Numeric symbol identifier fixed to AAPL (constant = 1) |
 | price | 24 | 32 | Unsigned fixed-point integer representing cents |
 | qty | 56 | 32 | Unsigned share quantity; absolute volume for Modify commands |
 | side | 88 | 8 | 0x01 = Bid, 0x02 = Ask |
@@ -249,7 +249,7 @@ The RX and TX paths use fixed-width binary contracts so the PL logic and host-si
 | Field | Bit offset | Width (bits) | Protocol Encoding & Meaning |
 |:---|:---|:---|:---|
 | order_id | 0 | 32 | Client-assigned tracking identifier forwarded to the exchange |
-| symbol | 32 | 16 | Numeric equity asset identifier (constant = 1) |
+| symbol | 32 | 16 | Numeric equity asset identifier fixed to AAPL (constant = 1) |
 | side | 48 | 8 | 0x01 = Buy, 0x02 = Sell |
 | qty | 56 | 32 | RiskGuard-validated outbound order size |
 | price | 88 | 32 | Executable order price mapped to integer cents |
