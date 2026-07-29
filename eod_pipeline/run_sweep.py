@@ -1,4 +1,4 @@
-"""Command-line entry point for the deterministic A.3 parameter sweep."""
+"""Command-line entry point for the deterministic parameter sweep."""
 
 from __future__ import annotations
 

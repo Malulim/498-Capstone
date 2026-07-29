@@ -1,4 +1,4 @@
-"""Unit tests for the A.3 real-data health-check primitives."""
+"""Unit tests for the backtest data-health primitives."""
 
 from __future__ import annotations
 

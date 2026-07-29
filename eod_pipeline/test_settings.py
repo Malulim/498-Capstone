@@ -44,6 +44,11 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.base_lot, 50)
         self.assertEqual(settings.momentum.entry_thresh, (0.0003, 0.0004, 0.0005))
+        self.assertEqual(
+            settings.review_thresholds.max_drawdown_warning_cad,
+            25_000,
+        )
+        self.assertEqual(settings.review_thresholds.min_trades, 10)
         self.assertEqual(settings.sha256(), rewritten.sha256())
         self.assertEqual(len(settings.sha256()), 64)
 
@@ -99,6 +104,15 @@ class SettingsTests(unittest.TestCase):
                 excessive = copy.deepcopy(self.valid)
                 excessive["risk_limits"][key] = maximum + 1
                 self.assert_invalid(excessive, "exceeds hard maximum")
+
+    def test_rejects_invalid_review_thresholds(self) -> None:
+        bad_drawdown = copy.deepcopy(self.valid)
+        bad_drawdown["review_thresholds"]["max_drawdown_warning_cad"] = 0
+        self.assert_invalid(bad_drawdown, "finite and positive")
+
+        bad_trades = copy.deepcopy(self.valid)
+        bad_trades["review_thresholds"]["min_trades"] = 1.5
+        self.assert_invalid(bad_trades, "must be an integer")
 
     def test_python_limits_match_c_header(self) -> None:
         header = SAFETY_HEADER.read_text(encoding="utf-8")

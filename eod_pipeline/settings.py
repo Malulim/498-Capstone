@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RING_SIZE = 64
 HARD_SAFETY_LIMITS = {
     "max_notional_cad": 50_000,
@@ -53,6 +53,12 @@ class RiskLimits:
 
 
 @dataclass(frozen=True)
+class ReviewThresholds:
+    max_drawdown_warning_cad: float
+    min_trades: int
+
+
+@dataclass(frozen=True)
 class EODSettings:
     schema_version: int
     base_lot: int
@@ -60,6 +66,7 @@ class EODSettings:
     mean_reversion: MeanReversionGrid
     defensive: DefensiveGrid
     risk_limits: RiskLimits
+    review_thresholds: ReviewThresholds
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +93,12 @@ class EODSettings:
                 "max_position_shares": self.risk_limits.max_position_shares,
                 "max_order_rate": self.risk_limits.max_order_rate,
                 "max_in_flight": self.risk_limits.max_in_flight,
+            },
+            "review_thresholds": {
+                "max_drawdown_warning_cad": (
+                    self.review_thresholds.max_drawdown_warning_cad
+                ),
+                "min_trades": self.review_thresholds.min_trades,
             },
         }
 
@@ -135,6 +148,15 @@ def _require_positive_int(value: Any, path: str, *, maximum: int | None = None) 
     if maximum is not None and value > maximum:
         raise SettingsError(f"{path}={value} exceeds hard maximum {maximum}")
     return value
+
+
+def _require_positive_number(value: Any, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsError(f"{path} must be a number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise SettingsError(f"{path} must be finite and positive")
+    return number
 
 
 def _positive_int_tuple(
@@ -198,7 +220,13 @@ def load_settings(path: str | Path) -> EODSettings:
     root = _require_object(raw, "settings")
     _require_exact_keys(
         root,
-        {"schema_version", "base_lot", "strategy_grids", "risk_limits"},
+        {
+            "schema_version",
+            "base_lot",
+            "strategy_grids",
+            "risk_limits",
+            "review_thresholds",
+        },
         "settings",
     )
     schema_version = _require_positive_int(root["schema_version"], "schema_version")
@@ -291,6 +319,23 @@ def load_settings(path: str | Path) -> EODSettings:
     }
     risk_limits = RiskLimits(**risk_values)
 
+    review_raw = _require_object(root["review_thresholds"], "review_thresholds")
+    _require_exact_keys(
+        review_raw,
+        {"max_drawdown_warning_cad", "min_trades"},
+        "review_thresholds",
+    )
+    review_thresholds = ReviewThresholds(
+        max_drawdown_warning_cad=_require_positive_number(
+            review_raw["max_drawdown_warning_cad"],
+            "review_thresholds.max_drawdown_warning_cad",
+        ),
+        min_trades=_require_positive_int(
+            review_raw["min_trades"],
+            "review_thresholds.min_trades",
+        ),
+    )
+
     _validate_integer_quantities(
         base_lot,
         (
@@ -307,4 +352,5 @@ def load_settings(path: str | Path) -> EODSettings:
         mean_reversion=mean_reversion,
         defensive=defensive,
         risk_limits=risk_limits,
+        review_thresholds=review_thresholds,
     )

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "base_lot": 50,
   "strategy_grids": {
     "momentum": {
@@ -22,5 +22,9 @@
     "max_position_shares": 1000,
     "max_order_rate": 1000,
     "max_in_flight": 100
+  },
+  "review_thresholds": {
+    "max_drawdown_warning_cad": 25000,
+    "min_trades": 10
   }
 }

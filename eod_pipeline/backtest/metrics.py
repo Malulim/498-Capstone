@@ -1,4 +1,4 @@
-"""Metric definitions for deterministic A.3 ranking."""
+"""Metric definitions for deterministic parameter ranking."""
 
 from __future__ import annotations
 

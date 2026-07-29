@@ -1,4 +1,4 @@
-"""Fixed-order parameter sweep and canonical A.3 result serialization."""
+"""Fixed-order parameter sweep and deterministic result serialization."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from eod_pipeline.settings import EODSettings
 
 
 SCHEMA_VERSION = 1
-CODE_VERSION = "a3-deterministic-backtest-v1"
+CODE_VERSION = "deterministic-backtest-v1"
 REGIME_STRATEGY = {
     "trending": "momentum",
     "ranging": "mean_reversion",
