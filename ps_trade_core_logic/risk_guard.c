@@ -1,6 +1,10 @@
 #include "risk_guard.h"
 #include <stdlib.h>
 
+unsigned long long order_notional_cad(const Decision *decision) {
+    return (unsigned long long)decision->qty * decision->price / 100;
+}
+
 RiskReject risk_guard_check(const RiskParams *risk_params,
                      int          position,
                      const Decision    *decision,
@@ -10,7 +14,7 @@ RiskReject risk_guard_check(const RiskParams *risk_params,
     // but max_notional_cad is in dollars, so this was rejecting every order.
     // Divide by 100 to compare dollars-to-dollars. Please double-check.
     // check notional value
-    if ((unsigned long long)decision->qty*decision->price / 100 > risk_params->max_notional_cad)
+    if (order_notional_cad(decision) > risk_params->max_notional_cad)
         return RISK_NOTIONAL;
     // check position value
     // 敞口 = 已成交仓位 + 在途净股数。只看已成交会漏掉在途的那一批：一个成交周期

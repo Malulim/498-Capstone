@@ -31,7 +31,8 @@ int main() {
                                                      order_table.in_flight_net_qty,
                                                      order_table.in_flight_orders);
             if (risk_check != RISK_OK) {
-                report_reject(&decision, risk_check);
+                report_reject(&decision, risk_check,
+                              position + order_table.in_flight_net_qty, &risk_params);
             } else {
                 // begin of the lifetime of an order
                 ++order_id; // README 3.1.3.4: increment before assign, counter starts at 0

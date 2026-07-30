@@ -22,6 +22,9 @@ void execute_order(Decision decision, unsigned int order_id);
 /* HOLD ticks and rejections consume no order_id, so without these they leave
  * no trace in the console output at all. */
 void report_hold(const Snapshot *snap);
-void report_reject(const Decision *decision, RiskReject reason);
+/* exposure = 已成交仓位 + 在途净股数（本单还没算进去）。拒单行会按 reason 打出
+ * 触发它的那个数：position 打 exposure 的加法，notional 打本单金额。 */
+void report_reject(const Decision *decision, RiskReject reason,
+                   int exposure, const RiskParams *risk_params);
 
 #endif

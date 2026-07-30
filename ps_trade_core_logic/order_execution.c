@@ -1,4 +1,5 @@
 #include "order_execution.h"
+#include "risk_guard.h"   /* order_notional_cad: 拒单行和风控用同一个公式 */
 #include <stdio.h>
 
 /* Byte order matches Exchange_simulator/checker.py (little-endian '<'), the
@@ -71,9 +72,28 @@ static const char *reject_reason_text(RiskReject reason) {
     }
 }
 
-void report_reject(const Decision *decision, RiskReject reason) {
-    printf("[-] REJECT      %s qty=%5u px=%8.2f  reason=%s\n",
+void report_reject(const Decision *decision, RiskReject reason,
+                   int exposure, const RiskParams *risk_params) {
+    printf("[-] REJECT   %s qty=%5u px=%8.2f  reason=%-8s",
            decision->side == BUY ? "BUY " : "SELL",
            decision->qty, decision->price / 100.0,
            reject_reason_text(reason));
+
+    /* 打出触发这条限制的那个数，免得还要翻上一行 FILL 才知道为什么被拒 */
+    switch (reason) {
+        case RISK_POSITION: {
+            int delta = (decision->side == BUY) ? (int)decision->qty : -(int)decision->qty;
+            printf("  exposure=%+d %+d -> %+d /%u",
+                   exposure, delta, exposure + delta,
+                   risk_params->max_position_shares);
+            break;
+        }
+        case RISK_NOTIONAL:
+            printf("  notional=%llu /%u",
+                   order_notional_cad(decision), risk_params->max_notional_cad);
+            break;
+        default:
+            break;
+    }
+    printf("\n");
 }
