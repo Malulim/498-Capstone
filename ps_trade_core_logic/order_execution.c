@@ -73,7 +73,7 @@ static const char *reject_reason_text(RiskReject reason) {
 }
 
 void report_reject(const Decision *decision, RiskReject reason,
-                   int exposure, const RiskParams *risk_params) {
+                   int exposure_shares, const RiskParams *risk_params) {
     printf("[-] REJECT   %s qty=%5u px=%8.2f  reason=%-8s",
            decision->side == BUY ? "BUY " : "SELL",
            decision->qty, decision->price / 100.0,
@@ -84,7 +84,7 @@ void report_reject(const Decision *decision, RiskReject reason,
         case RISK_POSITION: {
             int delta = (decision->side == BUY) ? (int)decision->qty : -(int)decision->qty;
             printf("  exposure=%+d %+d -> %+d /%u",
-                   exposure, delta, exposure + delta,
+                   exposure_shares, delta, exposure_shares + delta,
                    risk_params->max_position_shares);
             break;
         }

@@ -8,13 +8,15 @@
 unsigned long long order_notional_cad(const Decision *decision);
 
 /* Returns RISK_OK (0) if the order passes, else which limit rejected it.
- *   position          = 已成交仓位（股）
- *   in_flight_net_qty = 在途订单净股数（股，BUY 正 SELL 负）→ 用于 max_position_shares
- *   in_flight_orders  = 在途订单条数 → 留给 max_in_flight，尚未启用 */
+ *   settled_position_shares = 已成交仓位（股，BUY 正 SELL 负）
+ *   in_flight_net_shares    = 在途订单净股数（股，同上符号）
+ *   in_flight_order_count   = 在途订单条数（单）
+ * 前两个相加才是总敞口，position 检查比的是那个和；第三个留给 max_in_flight，
+ * 尚未启用。三个量纲不同（股 / 股 / 单），不要互相替代。 */
 RiskReject risk_guard_check(const RiskParams *risk_params,
-                     int          position,
+                     int          settled_position_shares,
                      const Decision    *decision,
-                     int          in_flight_net_qty,
-                    unsigned int in_flight_orders);
+                     int          in_flight_net_shares,
+                    unsigned int in_flight_order_count);
 
 #endif
