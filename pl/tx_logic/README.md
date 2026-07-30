@@ -43,19 +43,31 @@ Mac 上可以写 RTL、lint、跑仿真,但无法综合、无法配 TEMAC IP、�
 
 ## 决定:FCS 和 padding 交给 TEMAC
 
-**配置 TEMAC IP 时开启 FCS insertion 和 frame padding 两个选项**,我们两样都不写。
-这样可以从范围里去掉一个 CRC32 模块(FCS 覆盖 payload,不像 IP header checksum 那样
-是编译期常量,不能硬编码),`tx_frame_builder` 只需发满 58 字节就停。
+我们两样都不写,`tx_frame_builder` 发满 58 字节就停。这样能从范围里去掉一个 CRC32 模块
+(FCS 覆盖 payload,不像 IP header checksum 那样是编译期常量,不能硬编码)。
 
-配置 IP 时要确认这两个选项确实打开了。如果 padding 不可用,`tx_frame_builder` 需要
-多发 2 个零字节、`tlast` 移到 byte 59——改动很小,但必须在配置阶段发现,而不是等一个
-58 字节的非法帧上了线才发现。
+**已查 PG051 v9.0 确认(p.99):padding 和 FCS 插入是 TEMAC 的默认行为,不是要去打开的
+选项。**原文:*"When fewer than 46 bytes of data are supplied by you to the MAC core, the
+transmitter module adds padding up to the minimum frame length. The exception to this is
+when the MAC core is configured for user-passed FCS."* 我们发 58 字节 = 14B 以太网头 +
+44B 数据,44 < 46,所以 MAC 补到 60 字节最小帧再加 4 字节 FCS,凑成合法的 64 字节。
+
+所以配置时**要做的是"别打开 user-supplied FCS passing"**(保持默认关闭),而不是去勾
+两个开关 —— 这跟本节原来的写法是反的。一旦打开那个选项,补 pad 和算 FCS 两件事**同时**
+落回我们头上,而我们两件都没实现;届时 MAC 只会在帧尾补零,对端每一帧都判 FCS 错误,
+而我们自己的 transmit statistics 依然报告帧是好的。
+
+完整的 IP 配置契约(含 RGMII、frame filter、`tx_axis_mac_tuser` 必须拉低等)在主
+`README.md` 的 **3.1.2 Decision 1 → TEMAC IP Customization Contract** 一节,那里逐条给了
+PG051 页码。
 
 ### 遗留问题
 
-1. **TEMAC 的 AXI4-Stream `tdata` 实际位宽是多少?** 目前全部按 8-bit 设计
-   (8 bit × 125 MHz = 1 Gbps,结构上对得上)。如果实际更宽,需要引入 `tkeep` 并重做
-   serializer。
+~~1. **TEMAC 的 AXI4-Stream `tdata` 实际位宽是多少?**~~ **已解决**:PG051 Table 2
+(p.20)确认 `tx_axis_mac_tdata[7:0]`,就是 8 位。按字节串行的设计是对的,不需要
+`tkeep`。
+
+(本节暂无未决问题。)
 
 ---
 
@@ -176,13 +188,17 @@ PS ─────────────────────────�
 
 | 信号 | 位宽 | 方向 | 说明 |
 |---|---|---|---|
-| `m_axis_tdata` | 8 | out | **假设值**,未确认——见遗留问题 1 |
+| `m_axis_tdata` | 8 | out | 已由 PG051 Table 2(p.20)确认:`tx_axis_mac_tdata[7:0]` |
 | `m_axis_tvalid` | 1 | out | `rst_n` 拉低期间必须为 0(AXI4-Stream 硬性要求) |
 | `m_axis_tlast` | 1 | out | 在 byte 57 拉高,即我们发送的最后一个字节 |
 | `m_axis_tready` | 1 | in | 真实反压——TEMAC 是和 RX 共用的硬件资源,可能忙 |
 
-不需要 `tkeep`:仅在 8-bit `tdata` 下成立,每次传输都是完整一个字节。如果遗留问题 1
-的答案是更宽的总线,这条要重新考虑。
+不需要 `tkeep`:8-bit `tdata` 下每次传输都是完整一个字节。位宽已经查证,这条不再是假设。
+
+另外两条 PG051 明文规定、但仿真兜不住的义务(详见主 README 的 IP 配置契约一节):
+**`tvalid` 在 `tlast` 之前绝对不能撤**(p.99,MAC 不缓冲,提前撤等于 underrun,帧被中止);
+**`tx_axis_mac_tuser` 必须拉低**(p.20,它是输入,拉高会让 MAC 主动把帧打成错误帧)——
+`tx_top` 没引出这个端口,得由板级顶层接地。
 
 **帧布局。**我们发送 byte 0–57 并拉 `tlast`,pad 和 FCS 由 TEMAC 补:
 

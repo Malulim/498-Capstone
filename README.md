@@ -140,6 +140,53 @@ Development speed is the binding constraint because the pipeline cycle budget cl
 
 - **Latency Impact:** The core introduces a deterministic pipeline delay of ≈20 clock cycles during RGMII DDR capture (≈160 ns at 125 MHz), accounted for in Decision 2.
 
+##### TEMAC IP Customization Contract
+
+Selecting vendor IP moves work out of RTL and into IP configuration, so the configuration
+itself becomes a correctness dependency. The PL RTL in `pl/` is written against the
+following assumptions, each traced to *PG051 (v9.0)*. **A wrong setting here produces an
+illegal frame on the wire while every simulation stays green**, because the MAC does not
+exist in simulation.
+
+| Setting | Required value | Why | PG051 |
+|:---|:---|:---|:---|
+| Physical Interface | RGMII | Board-level requirement; RGMII holds `tx_mac_aclk` at 125 MHz at every MAC speed | p. 219 |
+| Data Rate / MAC Speed | 1 Gbps | NFS1 link budget | p. 218 |
+| **User-supplied FCS passing** | **Disabled** | The single most consequential option. Left disabled (the default), the MAC computes and appends the FCS itself **and** pads short frames. Enabling it transfers **both** responsibilities to our RTL, and we implement neither | p. 99 |
+| Frame Filter | Enabled, unicast destination MAC | RX drops frames not addressed to us (3.1.3.1). This is also why the TX path uses a unicast locally-administered MAC rather than broadcast | p. 97 |
+| Jumbo frames | Disabled | Fixed 60-byte order frames; no legitimate frame approaches the 1,518-byte limit | p. 96 |
+
+**Padding and FCS insertion are default behaviour, not features to switch on.** PG051 p. 99:
+*"When fewer than 46 bytes of data are supplied by you to the MAC core, the transmitter
+module adds padding up to the minimum frame length. The exception to this is when the MAC
+core is configured for user-passed FCS."* The TX path emits 58 bytes (14 B Ethernet header +
+44 B of data); 44 < 46, so the MAC pads to the 60-byte minimum and appends the 4-byte FCS,
+producing a legal 64-byte frame. Enabling user-supplied FCS inverts this silently: the core
+then appends zeros instead of padding correctly, and the link partner rejects every frame on
+an FCS error — while our own transmit statistics vector still reports the frame as good.
+
+Three interface obligations the RTL must satisfy that no simulation can enforce, because the
+AXI4-Stream sink in `pl/tx_logic/tb/tb_tx_top.sv` is our own stub rather than the MAC:
+
+1. **`tx_axis_mac_tuser` must be driven Low** for the whole frame. It is an *input* to the
+   MAC (PG051 Table 2, p. 20) that injects an error code to deliberately corrupt the frame in
+   flight. `tx_top` does not expose this port, so **the board-level wrapper must tie it low**;
+   leaving it unconnected corrupts every transmitted frame.
+2. **`tvalid` must never deassert before `tlast`.** PG051 p. 99 classifies an early
+   deassertion as a frame underrun and aborts the frame — the MAC does not buffer, so any gap
+   is passed straight through to the PHY. `tx_frame_builder` holds `tvalid` for the entire
+   frame and lets only `tready` throttle it, which satisfies this.
+3. **Backpressure on `tready` is guaranteed, not hypothetical.** PG051 p. 98: the core takes
+   the first two bytes, then *"waits until it is allowed to transmit."* Every frame stalls
+   after byte 2, so the backpressure handling in `tx_frame_builder` sits on the normal path,
+   not on an edge case.
+
+**Resolved by this document:** the transmit user interface is `tx_axis_mac_tdata[7:0]` — 8
+bits (PG051 Table 2, p. 20). This was previously an unverified assumption carried as an open
+question in `pl/tx_logic/README.md`. The byte-serial serializer is correct as written, and
+`tkeep` is not required.
+
+
 #### Decision 2 — Parse Architecture: Store-and-Forward vs. Cut-Through Streaming Parse
 
 - **Line-Rate Throughput Analysis:** For a 24-byte payload, the maximum theoretical packet rate over a 1 Gbps link is derived as:
