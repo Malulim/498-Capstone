@@ -59,6 +59,54 @@ Mac 上可以写 RTL、lint、跑仿真,但无法综合、无法配 TEMAC IP、�
 
 ---
 
+## 决定:链路常量的单一来源
+
+`tx_frame_builder.sv` 里那 42 字节常量头(MAC / IP / 端口 / IP checksum)和
+`scripts/generate_golden_frames.py` 的 `build_network_header()` **必须逐字节一致**。
+两边曾各写各的(RTL:广播 MAC + 192.168.1.1↔.2 + 端口 9000;脚本:单播 LAA MAC +
+192.168.1.10↔.20 + 端口 12345/12346),**每一个字段都不同**——这正是本文档开头警告过的
+"两边各自实现、上板才发现对不上"。
+
+**逐字段按技术上更优的那个选,不按"哪边改起来省事"选。**黄金帧重新生成一次是几秒钟的事,
+不构成选型理由。结果是大部分字段跟脚本、DF 位跟 RTL:
+
+| 字段 | 采用值 | 来自 | 依据 |
+|---|---|---|---|
+| dst MAC | `02:00:00:00:00:02` | 脚本 | 见下 |
+| src MAC | `02:00:00:00:00:01` | 脚本 | 见下 |
+| EtherType | `0x0800` | 一致 | 主 README 3.1.3.1 明文 |
+| **IP flags/frag** | **`0x4000` (DF)** | **RTL** | **见下** |
+| TTL / protocol | `64` / `17` | 一致 | protocol=17 是主 README 3.1.3.1 明文 |
+| src IP / dst IP | `192.168.1.10` / `192.168.1.20` | 脚本 | 跟 oracle |
+| **UDP dst port** | **`12346`** | 脚本 | **`ExchangeSimulator.py` 硬约束** |
+| UDP src port | `12345` | 脚本 | 与行情下发端口一致 |
+| UDP checksum | `0x0000` | 一致 | 主 README 3.1.3.1:P2P 链路绕过,靠以太网 FCS |
+| IP checksum | `0xB752` | 算出 | 上面这套常量的函数,非独立选项 |
+
+**UDP 目的端口 12346 是外部钉死的。**`Exchange_simulator/ExchangeSimulator.py` 的
+`receive_and_log_orders()` 里 `sock.bind(("0.0.0.0", 12346))` 就是订单接收端;
+`start_paced_replay(..., 12345)` 是行情下发端。发到别的端口没人收。这条不是取舍,
+是约束——**改这两个端口前先改 simulator**。
+
+**dst MAC 不用广播。**原 RTL 是 `FF:FF:FF:FF:FF:FF`。主 README 3.1.3.1 写明 TEMAC
+"filters non-matching destination MAC addresses",即两端都靠单播 MAC 过滤收帧,TX 发广播
+和 RX 的设计前提矛盾;而且广播帧会被链路上任何设备泛洪,NFS2 要求的"10 分钟零不明丢帧"
+就得先解释这些泛洪副本。`02:` 开头是 locally administered 单播地址,私有点对点链路的标准
+选择。
+
+**IP flags 取 DF(`0x4000`),这一条是脚本跟 RTL 改。**订单帧是定长的,任何 MTU 下都不会
+分片,置 DF 位是表达"这个数据报不许被分片"的规范做法。在这条点对点链路上两种写法行为
+完全相同,但 DF 陈述了意图:将来若这条路径上出现了会分片的中间设备,DF 会让它回一个
+ICMP 错误,而不是**把一笔订单悄悄劈成两半**。脚本已同步改为 `0x4000`,黄金帧已重新生成。
+
+`IP_CHECKSUM` 是上述常量的函数,不是独立可选项——**任何一个头字段变了,checksum 必须
+重算**。跑一次脚本,`meta.json` 里的头 20 字节就是新值(DF 改动就把它从 `0xF752` 变成了
+`0xB752`)。它是编译期常量,不做运行时加法器。
+
+改完后 `tb_tx_frame_builder` 对着重新生成的黄金帧跑 **18 项全过**,含反压场景逐字节一致。
+
+---
+
 ## Layer 1 — 模块划分
 
 ```
@@ -69,8 +117,8 @@ PS ─────────────────────────�
 | 模块 | 文件 | 职责 | Owner |
 |---|---|---|---|
 | `axi_lite_regbank` | `../axi_lite_regbank.sv` | 唯一懂 AXI-Lite 协议的模块。译码 Table 15(0x40–0x54 段),拆包 `ORD_SYMBOL_SIDE`,实现 DOORBELL 的 write-1-to-pulse | lucy |
-| `tx_order_latcher` | `tx_order_latcher.sv` | 在 `doorbell_pulse` 上采样订单字段;屏蔽忙碌期到达的 doorbell;驱动 `tx_ready` | TBD |
-| `tx_frame_builder` | `tx_frame_builder.sv` | Payload Build + Frame Build 合并。打包 Table 7,拼接常量 Eth/IP/UDP 头,按字节串行输出到 AXI4-Stream | TBD |
+| `tx_order_latcher` | `tx_order_latcher.sv` | 在 `doorbell_pulse` 上采样订单字段;屏蔽忙碌期到达的 doorbell;驱动 `tx_ready` | hanyu |
+| `tx_frame_builder` | `tx_frame_builder.sv` | Payload Build + Frame Build 合并。打包 Table 7,拼接常量 Eth/IP/UDP 头,按字节串行输出到 AXI4-Stream | panzy |
 | `tx_top` | `tx_top.sv` | 纯接线,自身无逻辑 | — |
 
 划分理由:
@@ -245,36 +293,74 @@ RX owner 接手时在读 mux 和写 case 里各加自己的地址即可,AXI 协�
 
 ### `tx_order_latcher`
 
-- [ ] 空闲时来 doorbell → `cmd_valid` 出现 1 拍,`cmd_*` 捕获到正确的 `ord_*` 值
-- [ ] **忙碌时来 doorbell → 没有 `cmd_valid`,且 `cmd_*` 保持不变** —— 这是整套设计的
+- [x] 空闲时来 doorbell → `cmd_valid` 出现 1 拍,`cmd_*` 捕获到正确的 `ord_*` 值
+- [x] **忙碌时来 doorbell → 没有 `cmd_valid`,且 `cmd_*` 保持不变** —— 这是整套设计的
       安全不变量,这一条比其他所有用例加起来都重要
-- [ ] `tx_ready` 始终等于 `!frame_builder_busy`
-- [ ] 复位:`cmd_valid` 为 0
+- [x] `tx_ready` 始终等于 `!frame_builder_busy`
+- [x] 复位:`cmd_valid` 为 0
 
 当前模块没有 pending buffer 或 FIFO。busy 时到达的 doorbell 会被直接丢弃；需要重试时, 由 PS 重新读取 `TX_READY` 并提交新的 doorbell。
 
-从 `pl/tx_logic/` 运行 lint 和自检查 testbench:
+从 `pl/tx_logic/` 运行 lint 和自检查 testbench(`--Mdir` 见工具链那节的路径限制):
 
 ```bash
-verilator --lint-only --Wall tx_order_latcher.sv
+verilator --lint-only --Wall --timescale 1ns/1ps tx_order_latcher.sv
 
-verilator --binary --timing --assert --Wall \
+verilator --binary --timing --assert --timescale 1ns/1ps \
   --top-module tb_tx_order_latcher \
-  --Mdir sim/tx_order_latcher \
+  --Mdir ~/aqta_sim/latcher \
   tx_order_latcher.sv tb/tb_tx_order_latcher.sv
-./sim/tx_order_latcher/Vtb_tx_order_latcher
+~/aqta_sim/latcher/Vtb_tx_order_latcher
 ```
 
 ### `tx_frame_builder`
 
-- [ ] 一帧**恰好 58 字节**,`tlast` 出现在最后一个字节上
-- [ ] **中途拉低 `tready` 若干拍 → 字节不丢、不重复**(反压测试)
-- [ ] byte 42–57 的字段位置和字节序与 Table 7 一致
-- [ ] byte 0–41 与常量头逐字节一致(含预计算的 IP checksum)
-- [ ] `frame_builder_busy` 与 `cmd_valid` **同一拍**拉高(锁死的组合要求)
-- [ ] 复位:`m_axis_tvalid` 为 0
+- [x] 一帧**恰好 58 字节**,`tlast` 出现在最后一个字节上
+- [x] **中途拉低 `tready` 若干拍 → 字节不丢、不重复**(反压测试)
+- [x] byte 42–57 的字段位置和字节序与 Table 7 一致
+- [x] byte 0–41 与常量头逐字节一致(含预计算的 IP checksum)
+- [x] `frame_builder_busy` 与 `cmd_valid` **同一拍**拉高(锁死的组合要求)
+- [x] 复位:`m_axis_tvalid` 为 0
+
+最后那条**必须在 `cmd_valid` 那一拍本身检查**。在"下一拍"检查是无效的:那时 FSM 已经
+进了 `ST_SEND`,`busy` 无论组合还是寄存器输出都是 1,把 `busy` 写成寄存器也照样通过。
+现在的 tb 在同一拍查,并反测确认过——把 `busy` 改成只看 `ST_SEND`,这一条会红。
+
+**testbench 需要黄金帧文件在当前目录下**,而且它驱动的字段值必须与
+`scripts/generate_golden_frames.py` 的 `main()` 完全一致(见下节):
+
+```bash
+python3 scripts/generate_golden_frames.py ~/aqta_sim/fb
+
+verilator --binary --timing --assert --timescale 1ns/1ps \
+  --top-module tb_tx_frame_builder \
+  --Mdir ~/aqta_sim/fb/build \
+  tx_frame_builder.sv tb/tb_tx_frame_builder.sv
+cd ~/aqta_sim/fb && ./build/Vtb_tx_frame_builder   # 必须在 hex 文件所在目录下跑
+```
 
 ---
+
+## 黄金帧文件契约
+
+`scripts/generate_golden_frames.py` 是 Table 7 布局和 42 字节常量头的**唯一 oracle**。
+它一次输出这些文件:
+
+| 文件 | 内容 | 谁用 |
+|---|---|---|
+| `golden_frame_<i>.hex` | 第 i 组用例的 58 行,每行一字节 | 单元/集成 testbench 的 `$readmemh` |
+| `golden_frames.hex` | 全部用例首尾相接 | 想一次读全部的场景 |
+| `golden_frames.bin` | 同上的二进制 | 喂 simulator / Wireshark 对照 |
+| `golden_frames_meta.json` | 每组用例的输入字段 + 整帧 hex | 人看的,排查时对字段 |
+
+**testbench 一律读 `golden_frame_<i>.hex`,不要去 `golden_frames.hex` 里按偏移取。**
+`$readmemh` 读进一个 58 元素的数组时,文件本身就是边界;而手写 `base + i` 偏移一旦算错,
+读到的是**另一组用例的字节**,报出来的现象是"字节序错了"——会往 RTL 上查很久。
+
+**驱动值必须与 `main()` 里的用例一一对应。**tb 里的 `C0_*` / `C1_*` localparam 就是
+`main()` 那两组的镜像,加减用例时两边一起改。`main()` 的值是刻意挑的:`10001 = 0x2711`、
+`1505000 = 0x16F6E8`,每个字节都不同,错位或字节序反了不可能碰巧对上;两组的 symbol 和
+side 也不同,保证这两个字段的位置是被测出来的而不是被假定的。
 
 ## 集成测试:黄金帧比对
 
@@ -310,7 +396,22 @@ Python oracle 对 Table 7 的理解**从构造上就一致**,不会出现两边�
 | 4 | Python golden frame 生成脚本 | 无 | ashley |
 | 5 | 集成测试 testbench | 1、2、3、4 | lucy |
 
-1、2、3 之间没有依赖,接口已经锁死,可以并行开工。
+1、2、3、4 已完成,三个模块 lint clean、单元测试各自通过,`tx_top` 可以 elaborate。
+剩下 5。
+
+集成之前踩过、已经修掉的坑,记在这里免得再来一次:
+
+- **常量头两边各写各的**,每个字段都不同(见「决定:链路常量以 golden 脚本为准」)。
+- **端口名分叉**:`tx_frame_builder` 一度把订单号叫 `cmd_id`,而契约、`tx_order_latcher`、
+  `tx_top` 都是 `cmd_order_id`——`tx_top` 直接 elaborate 失败。**接口契约里的名字是名字,
+  不是示意**。
+- **黄金帧文件名/用例数据分叉**:tb 读 `golden_frame_<i>.hex`,脚本当时只吐一个拼接的
+  `golden_frames.hex`;两边的测试数据也不是同一批。现在脚本两种都吐,契约写在
+  「黄金帧文件契约」一节。
+- **`context` 是 SystemVerilog 保留字**,`tb_tx_order_latcher.sv` 拿它当参数名,Verilator
+  连报十几行 syntax error。已改成 `ctx`。
+- **testbench 只累加 fail 计数、不 `$fatal`**,退出码永远是 0——122 个失败照样"正常结束"。
+  已改成失败时非零退出。testbench 报告失败却不让调用方知道,等于没测。
 
 `axi_lite_regbank` 是 RX 和 TX 都要用的模块,建议**优先做、且只由一个人写**——两边都
 依赖它的输出信号,两个人同时改一个文件容易冲突。

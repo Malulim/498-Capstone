@@ -45,11 +45,16 @@ class GoldenFrameGenerator:
         eth_hdr = self.dst_mac + self.src_mac + struct.pack('>H', self.eth_type)
         
         # IP Header without checksum (20B)
-        # Total Length = 44 (20B IP + 8B UDP + 16B Payload)
+        # Total Length = 44 (20B IP + 8B UDP + 16B Payload). Excludes the
+        # Ethernet pad TEMAC appends -- padding sits below IP.
+        # Flags = 0x4000 (Don't Fragment): this datagram is fixed-size and must
+        # never be fragmented. Nothing on a point-to-point link would fragment
+        # it anyway, but DF states the intent, so a middlebox on some future
+        # path raises an ICMP error instead of silently splitting an order.
         ip_hdr_no_cksum = (
-            struct.pack('>BBHHHBB', 0x45, 0x00, 44, 0, 0, 64, 17) 
-            + b'\x00\x00' 
-            + self.ip_src 
+            struct.pack('>BBHHHBB', 0x45, 0x00, 44, 0, 0x4000, 64, 17)
+            + b'\x00\x00'
+            + self.ip_src
             + self.ip_dst
         )
         cksum = compute_ip_checksum(ip_hdr_no_cksum)
@@ -113,13 +118,26 @@ class GoldenFrameGenerator:
         hex_path = os.path.join(output_dir, "golden_frames.hex")
         meta_path = os.path.join(output_dir, "golden_frames_meta.json")
 
+        per_case_paths = []
+
         with open(bin_path, "wb") as f_bin, open(hex_path, "w") as f_hex:
             meta_json_data = []
-            for case in self.test_cases:
+            for idx, case in enumerate(self.test_cases):
                 f_bin.write(case["raw_bytes"])
                 for byte_hex in case["hex_bytes"]:
                     f_hex.write(f"{byte_hex}\n")
-                
+
+                # One file per case as well. A testbench that $readmemh's a
+                # 58-entry array from its own file cannot silently pick up the
+                # wrong baseline; indexing into the concatenated file with a
+                # hand-written case offset can, and the failure looks like an
+                # RTL byte-order bug.
+                case_path = os.path.join(output_dir, f"golden_frame_{idx}.hex")
+                with open(case_path, "w") as f_case:
+                    for byte_hex in case["hex_bytes"]:
+                        f_case.write(f"{byte_hex}\n")
+                per_case_paths.append(case_path)
+
                 meta_json_data.append({
                     "case_name": case["case_name"],
                     "inputs": case["inputs"],
@@ -130,13 +148,20 @@ class GoldenFrameGenerator:
             json.dump(meta_json_data, f_meta, indent=2)
 
         print(f"Generated golden frames in '{output_dir}':")
-        print(f"  - Binary: {bin_path}")
-        print(f"  - $readmemh Hex: {hex_path}")
+        print(f"  - Binary (all cases): {bin_path}")
+        print(f"  - $readmemh Hex (all cases): {hex_path}")
+        for idx, p in enumerate(per_case_paths):
+            print(f"  - $readmemh Hex (case {idx}): {p}")
         print(f"  - Metadata: {meta_path}")
 
 def main():
     gen = GoldenFrameGenerator()
-    # Test cases matching the 16-bit symbol integer structure
+    # These cases ARE the contract: any testbench comparing against
+    # golden_frame_<i>.hex must drive exactly these field values, in this
+    # order. Values are deliberately byte-distinct (10001 = 0x2711,
+    # 1505000 = 0x16F6E8) so a swapped or misplaced byte cannot coincidentally
+    # match, and symbol/side differ between the two cases so their placement is
+    # exercised rather than assumed.
     gen.add_test_case("Basic_Buy_Limit", order_id=10001, symbol=0x0001, side=1, qty=100, price=1505000)
     gen.add_test_case("Basic_Sell_Limit", order_id=10002, symbol=0x0002, side=2, qty=50, price=3102000)
 

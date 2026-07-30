@@ -1,4 +1,3 @@
-`timescale 1ns/1ps
 // tx_frame_builder.sv
 // Serializer FSM: outputs 58 bytes onto AXI4-Stream with backpressure.
 // Byte counter only advances when tvalid & tready both high.
@@ -9,9 +8,11 @@
 //   byte 34-41 : UDP header           (big-endian, constants)
 //   byte 42-57 : Table-7 payload      (little-endian, from cmd_*)
 //
-// IP header checksum: pre-computed for fixed header with total_len=44.
-// Run gen_golden_frame.py to verify — value below is for the default
-// src/dst IP pair (192.168.1.1 → 192.168.1.2) used in testbench.
+// IP header checksum: pre-computed for the fixed header with total_len=44.
+// Every header field on this point-to-point link is constant, so the checksum
+// is too. Link constants and checksum are owned by
+// scripts/generate_golden_frames.py — see "决定:链路常量的单一来源"
+// in README.md before touching any of them.
 
 module tx_frame_builder (
     input  logic        clk,
@@ -23,7 +24,7 @@ module tx_frame_builder (
     input  logic [7:0]  cmd_side,
     input  logic [31:0] cmd_qty,
     input  logic [31:0] cmd_price,
-    input  logic [31:0] cmd_id,
+    input  logic [31:0] cmd_order_id,
 
     // AXI4-Stream master to TEMAC
     output logic [7:0]  m_axis_tdata,
@@ -37,10 +38,16 @@ module tx_frame_builder (
 
     // ----------------------------------------------------------------
     // Frame constants — Ethernet + IPv4 + UDP headers (42 bytes)
-    // Adjust MAC/IP addresses to match your point-to-point link config.
+    // These MUST stay identical to build_network_header() in
+    // scripts/generate_golden_frames.py, which is the oracle for the
+    // integration test. Changing one side alone silently breaks byte compare.
     // ----------------------------------------------------------------
-    localparam [47:0] DST_MAC      = 48'hFF_FF_FF_FF_FF_FF;
-    localparam [47:0] SRC_MAC      = 48'hAA_BB_CC_DD_EE_FF;
+    // Locally administered unicast MACs. Not broadcast: TEMAC filters RX on
+    // destination MAC (README 3.1.3.1), and a broadcast order frame would be
+    // flooded by anything between the two ends, which NFS2 ("zero unexplained
+    // frame drops") then has to explain away.
+    localparam [47:0] DST_MAC      = 48'h02_00_00_00_00_02;
+    localparam [47:0] SRC_MAC      = 48'h02_00_00_00_00_01;
     localparam [15:0] ETHERTYPE    = 16'h0800;
 
     // IPv4 header (20 bytes)
@@ -48,18 +55,24 @@ module tx_frame_builder (
     localparam [7:0]  IP_DSCP      = 8'h00;
     localparam [15:0] IP_TOTAL_LEN = 16'd44;   // 20(IP)+8(UDP)+16(payload)
     localparam [15:0] IP_ID        = 16'h0000;
-    localparam [15:0] IP_FRAG      = 16'h4000; // Don't Fragment
+    // Don't Fragment. The order datagram is fixed-size and must never be
+    // fragmented; nothing on a point-to-point link would fragment it, but DF
+    // states the intent so a middlebox on some future path raises an ICMP
+    // error instead of silently splitting an order in half.
+    localparam [15:0] IP_FRAG      = 16'h4000;
     localparam [7:0]  IP_TTL       = 8'd64;
     localparam [7:0]  IP_PROTO     = 8'd17;    // UDP
-    // Checksum for: 45 00 00 2C 00 00 40 00 40 11 ?? ?? C0A80101 C0A80102
-    // = 0xB861  (verified by gen_golden_frame.py)
-    localparam [15:0] IP_CHECKSUM  = 16'hB76D; // verified by gen_golden_frame.py
-    localparam [31:0] SRC_IP       = 32'hC0A80101; // 192.168.1.1
-    localparam [31:0] DST_IP       = 32'hC0A80102; // 192.168.1.2
+    // Checksum over: 45 00 00 2C 0000 4000 40 11 ???? C0A8010A C0A80114
+    localparam [15:0] IP_CHECKSUM  = 16'hB752;
+    localparam [31:0] SRC_IP       = 32'hC0A8010A; // 192.168.1.10
+    localparam [31:0] DST_IP       = 32'hC0A80114; // 192.168.1.20
 
     // UDP header (8 bytes)
-    localparam [15:0] UDP_SRC_PORT = 16'd9000;
-    localparam [15:0] UDP_DST_PORT = 16'd9000;
+    // 12346 is not a free choice: ExchangeSimulator.py binds 0.0.0.0:12346 to
+    // receive orders. 12345 is the port the market-data feed is sent to, i.e.
+    // our own RX port, used here as the source.
+    localparam [15:0] UDP_SRC_PORT = 16'd12345;
+    localparam [15:0] UDP_DST_PORT = 16'd12346;
     localparam [15:0] UDP_LENGTH   = 16'd24;   // 8(UDP)+16(payload)
     localparam [15:0] UDP_CHECKSUM = 16'h0000; // bypassed on P2P link
 
@@ -163,10 +176,10 @@ module tx_frame_builder (
 
             // --- Table-7 payload (bytes 42-57) little-endian ---
             // order_id [31:0] → bytes 42-45 (LSB first)
-            6'd42: m_axis_tdata = cmd_id[7:0];
-            6'd43: m_axis_tdata = cmd_id[15:8];
-            6'd44: m_axis_tdata = cmd_id[23:16];
-            6'd45: m_axis_tdata = cmd_id[31:24];
+            6'd42: m_axis_tdata = cmd_order_id[7:0];
+            6'd43: m_axis_tdata = cmd_order_id[15:8];
+            6'd44: m_axis_tdata = cmd_order_id[23:16];
+            6'd45: m_axis_tdata = cmd_order_id[31:24];
             // symbol [15:0] → bytes 46-47
             6'd46: m_axis_tdata = cmd_symbol[7:0];
             6'd47: m_axis_tdata = cmd_symbol[15:8];
