@@ -41,7 +41,10 @@ module tb_tx_order_latcher;
     .frame_builder_busy
   );
 
-  always #(CLK_PERIOD / 2) clk = ~clk;
+  // initial-forever, not `always`: Verilator's --Wall flags a blocking
+  // assignment inside a sequential always (BLKSEQ) and turns it into an error,
+  // which would make the documented build command fail on this file alone.
+  initial forever #(CLK_PERIOD / 2) clk = ~clk;
 
   task automatic check(input logic condition, input string message);
     if (!condition) begin
