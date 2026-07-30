@@ -14,7 +14,7 @@ module tb_tx_frame_builder;
     logic [7:0]  cmd_side   = 0;
     logic [31:0] cmd_qty    = 0;
     logic [31:0] cmd_price  = 0;
-    logic [31:0] cmd_id     = 0;
+    logic [31:0] cmd_order_id     = 0;
     logic        m_axis_tready = 1;
 
     logic [7:0]  m_axis_tdata;
@@ -53,12 +53,27 @@ module tb_tx_frame_builder;
         fork
             begin
                 @(posedge clk); #1;
-                cmd_id=oid; cmd_symbol=sym; cmd_side=sd; cmd_qty=qty; cmd_price=prc;
+                cmd_order_id=oid; cmd_symbol=sym; cmd_side=sd; cmd_qty=qty; cmd_price=prc;
                 cmd_valid=1; @(posedge clk); #1; cmd_valid=0;
             end
             collect_one_frame(fout, cnt);
         join
     endtask
+
+    // These MUST mirror main() in scripts/generate_golden_frames.py -- they are
+    // the exact inputs that produced golden_frame_0/1.hex. Drive anything else
+    // and the byte compare fails for a reason that has nothing to do with RTL.
+    localparam [31:0] C0_ID    = 32'd10001;
+    localparam [15:0] C0_SYM   = 16'h0001;
+    localparam [7:0]  C0_SIDE  = 8'd1;
+    localparam [31:0] C0_QTY   = 32'd100;
+    localparam [31:0] C0_PRICE = 32'd1505000;
+
+    localparam [31:0] C1_ID    = 32'd10002;
+    localparam [15:0] C1_SYM   = 16'h0002;
+    localparam [7:0]  C1_SIDE  = 8'd2;
+    localparam [31:0] C1_QTY   = 32'd50;
+    localparam [31:0] C1_PRICE = 32'd3102000;
 
     logic [7:0] golden_0[0:57];
     logic [7:0] golden_1[0:57];
@@ -83,8 +98,15 @@ module tb_tx_frame_builder;
         m_axis_tready = 1;
         // Fire cmd and immediately check busy on the NEXT posedge (must still be high)
         @(posedge clk); #1;
-        cmd_id=32'h1; cmd_symbol=16'h1; cmd_side=8'h1; cmd_qty=32'd100; cmd_price=32'd15050;
+        cmd_order_id=C0_ID; cmd_symbol=C0_SYM; cmd_side=C0_SIDE; cmd_qty=C0_QTY; cmd_price=C0_PRICE;
         cmd_valid = 1;
+        #1;
+        // THE discriminating check for this interface: busy must already be high
+        // in the cmd_valid cycle itself. A registered busy would still pass the
+        // "one cycle after" check below, and would leave a one-cycle hole for a
+        // doorbell to slip through the latcher's mask and rewrite cmd_* mid-frame.
+        check("busy high in the SAME cycle as cmd_valid (combinational)", frame_builder_busy === 1'b1);
+        check("tvalid still low in the cmd_valid cycle (frame starts next cycle)", m_axis_tvalid === 1'b0);
         @(posedge clk); #1;   // one cycle in: FSM has latched, busy via ST_SEND
         cmd_valid = 0;
         check("frame_builder_busy=1 one cycle after cmd_valid", frame_builder_busy === 1'b1);
@@ -93,7 +115,7 @@ module tb_tx_frame_builder;
 
         // ---- T3: Exact 58 bytes ----
         $display("\n[T3] Exact 58-byte frame");
-        run_and_collect(32'h1, 16'h1, 8'h1, 32'd100, 32'd15050, rx, rx_cnt);
+        run_and_collect(C0_ID, C0_SYM, C0_SIDE, C0_QTY, C0_PRICE, rx, rx_cnt);
         check("frame is exactly 58 bytes", rx_cnt === 58);
         wait(!frame_builder_busy); @(posedge clk); #1;
 
@@ -123,8 +145,8 @@ module tb_tx_frame_builder;
                 // cmd thread
                 begin
                     @(posedge clk); #1;
-                    cmd_id=32'h1; cmd_symbol=16'h1; cmd_side=8'h1;
-                    cmd_qty=32'd100; cmd_price=32'd15050;
+                    cmd_order_id=C0_ID; cmd_symbol=C0_SYM; cmd_side=C0_SIDE;
+                    cmd_qty=C0_QTY; cmd_price=C0_PRICE;
                     cmd_valid=1; @(posedge clk); #1; cmd_valid=0;
                 end
                 // collect thread with mid-stream stall
@@ -173,7 +195,7 @@ module tb_tx_frame_builder;
 
         // ---- T6: Second order, different fields ----
         $display("\n[T6] Golden frame — SELL 500 @ 2000.99");
-        run_and_collect(32'hDEADBEEF, 16'h1, 8'h2, 32'd500, 32'd200099, rx, rx_cnt);
+        run_and_collect(C1_ID, C1_SYM, C1_SIDE, C1_QTY, C1_PRICE, rx, rx_cnt);
         check("order 1: 58 bytes", rx_cnt === 58);
         begin
             automatic int pre = fail_count;
@@ -204,12 +226,14 @@ module tb_tx_frame_builder;
 
         $display("\n========================================");
         $display("PASS: %0d  FAIL: %0d", pass_count, fail_count);
-        if (fail_count == 0) $display("ALL TESTS PASSED");
-        else                 $display("SOME TESTS FAILED");
         $display("========================================");
+        // A testbench that prints failures and then exits 0 is invisible to any
+        // script that runs it -- fail loudly, with a non-zero status.
+        if (fail_count != 0) $fatal(1, "SOME TESTS FAILED (%0d failures)", fail_count);
+        $display("ALL TESTS PASSED");
         $finish;
     end
 
-    initial begin #1000000; $display("TIMEOUT"); $finish; end
+    initial begin #1000000; $fatal(1, "TIMEOUT -- a frame never completed"); end
 
 endmodule
