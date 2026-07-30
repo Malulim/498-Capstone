@@ -186,6 +186,10 @@ bits (PG051 Table 2, p. 20). This was previously an unverified assumption carrie
 question in `pl/tx_logic/README.md`. The byte-serial serializer is correct as written, and
 `tkeep` is not required.
 
+For what each PL module does, the invariants it must hold, and the exact commands to run
+every unit and integration testbench, see
+[`pl/module_specification.md`](pl/module_specification.md).
+
 
 #### Decision 2 — Parse Architecture: Store-and-Forward vs. Cut-Through Streaming Parse
 

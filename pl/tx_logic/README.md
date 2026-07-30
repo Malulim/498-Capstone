@@ -4,6 +4,16 @@
 开始,到向 TEMAC TX 输出一个合法的 AXI4-Stream 帧为止。TEMAC 本身是 Xilinx 现成
 IP,在板级顶层例化,本目录不实现它。
 
+> **这份文档写给要动 RTL 的人**,讲的是**为什么这样设计**:模块怎么划分、接口契约锁死了
+> 什么、每个决定放弃了什么替代方案。
+>
+> **要跑测试、或想搞清楚这些模块各自是干什么的,看
+> [`../module_specification.md`](../module_specification.md)** —— 那里有每个模块的职责、
+> 必须成立的不变量、覆盖了哪些用例,以及所有可直接粘贴的命令。
+>
+> **命令只写在那一份里。**同一批命令抄在两处必然漂移 —— 本文档曾经就有三处 `verilator`
+> 命令和实际在用的不一致(少 `--Wall`、少 `--timescale`),所以这里一条命令都不留。
+
 ## 当前阶段:只做编译与仿真
 
 现在的目标是**三个模块能编译、能通过单元测试和集成测试仿真**。综合、时序收敛、
@@ -288,17 +298,7 @@ VIP/BFM**——一个三十行的 SV task 完成一次写事务就够了。不�
 删掉 AW-first / W-first 中的一条通路、qty/price 互换、`BVALID` 只给 1 拍、提交时用了过期的
 latch 值……),15 处全部被 testbench 抓到。
 
-```bash
-# 从 pl/ 运行。--Mdir 必须落在无空格路径下,见上面工具链那节。
-cd pl
-verilator --lint-only --Wall axi_lite_regbank.sv
-
-verilator --binary --timing --assert --Wall --timescale 1ns/1ps \
-  --top-module tb_axi_lite_regbank \
-  --Mdir ~/aqta_sim/regbank \
-  axi_lite_regbank.sv tb/tb_axi_lite_regbank.sv
-~/aqta_sim/regbank/Vtb_axi_lite_regbank
-```
+跑法见 [`../module_specification.md`](../module_specification.md)。
 
 **Table 15 之外的一处有意偏离:**0x40–0x4C 在 Table 15 里是 W-only,但这里给了读回。
 理由是 AXI-Lite 写是 posted 的,上板 bring-up 时"PS 那 5 个写到底落没落"是最先要排查的
@@ -319,15 +319,7 @@ RX owner 接手时在读 mux 和写 case 里各加自己的地址即可,AXI 协�
 
 从 `pl/tx_logic/` 运行 lint 和自检查 testbench(`--Mdir` 见工具链那节的路径限制):
 
-```bash
-verilator --lint-only --Wall --timescale 1ns/1ps tx_order_latcher.sv
-
-verilator --binary --timing --assert --timescale 1ns/1ps \
-  --top-module tb_tx_order_latcher \
-  --Mdir ~/aqta_sim/latcher \
-  tx_order_latcher.sv tb/tb_tx_order_latcher.sv
-~/aqta_sim/latcher/Vtb_tx_order_latcher
-```
+跑法见 [`../module_specification.md`](../module_specification.md)。
 
 ### `tx_frame_builder`
 
@@ -345,15 +337,7 @@ verilator --binary --timing --assert --timescale 1ns/1ps \
 **testbench 需要黄金帧文件在当前目录下**,而且它驱动的字段值必须与
 `scripts/generate_golden_frames.py` 的 `main()` 完全一致(见下节):
 
-```bash
-python3 scripts/generate_golden_frames.py ~/aqta_sim/fb
-
-verilator --binary --timing --assert --timescale 1ns/1ps \
-  --top-module tb_tx_frame_builder \
-  --Mdir ~/aqta_sim/fb/build \
-  tx_frame_builder.sv tb/tb_tx_frame_builder.sv
-cd ~/aqta_sim/fb && ./build/Vtb_tx_frame_builder   # 必须在 hex 文件所在目录下跑
-```
+跑法见 [`../module_specification.md`](../module_specification.md)。
 
 ---
 
@@ -391,8 +375,15 @@ side 也不同,保证这两个字段的位置是被测出来的而不是被假�
 Python oracle 对 Table 7 的理解**从构造上就一致**,不会出现两边各自实现、上板才发现
 对不上的情况。
 
-建议至少跑两组数据(不同的 order_id/qty/price/side),确认变化的字段确实跟着变、常量
-头确实不变。
+已实现:`tb/tb_tx_top.sv`,4 帧 / 48 项检查。跑两组不同数据各比对一次,再加反压、
+以及帧发送中改寄存器 + 敲 doorbell 的屏蔽用例。用例清单和跑法见
+[`../module_specification.md` 第 6 节](../module_specification.md)。
+
+**其中一条是设计出来的,不是写完顺手加的:**集成 testbench 里有两条用层次化引用的断言
+(`dut.cmd_valid |-> dut.frame_builder_busy`)。因为**纯黑盒激励物理上够不到那个窗口** ——
+`busy` 若做成寄存器输出只开 1 拍的洞,而一次 AXI-Lite 写最少 3~4 拍,PS 根本发不出间隔
+1 拍的两个 doorbell。反测证实过:没有这条断言时,把 `busy` 改成寄存器输出,集成测试**照样
+全绿**。这条性质属于**接线本身**而不属于任何单个模块,所以由拥有接线的这一层来守。
 
 ### 仿真测不到的部分
 
@@ -412,8 +403,11 @@ Python oracle 对 Table 7 的理解**从构造上就一致**,不会出现两边�
 | 4 | Python golden frame 生成脚本 | 无 | ashley |
 | 5 | 集成测试 testbench | 1、2、3、4 | lucy |
 
-1、2、3、4 已完成,三个模块 lint clean、单元测试各自通过,`tx_top` 可以 elaborate。
-剩下 5。
+**1–5 全部完成。**三个模块 lint clean(`--Wall`)、四个 testbench 全过、`tx_top` 四个
+模块联合 elaborate 干净。当前进度和跑法见 [`../module_specification.md`](../module_specification.md)。
+
+**注意:仿真通过 ≠ 综合会过 ≠ 能上板。**综合、时序收敛、TEMAC IP 配置、bring-up 都还没
+开始,是三道独立的门槛。
 
 集成之前踩过、已经修掉的坑,记在这里免得再来一次:
 
