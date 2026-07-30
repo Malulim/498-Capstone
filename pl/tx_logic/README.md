@@ -28,6 +28,17 @@ TEMAC IP 配置、上板 bring-up 都不在这一轮范围内。
 Mac 上可以写 RTL、lint、跑仿真,但无法综合、无法配 TEMAC IP、无法上板——这些必须
 在 Windows 或 Linux 机器上做。
 
+跑 Verilator 时有两个跟本仓库路径有关的坑,和 RTL 无关但会直接卡住:
+
+1. **`--Mdir` 不能指向带空格的目录。** `verilated.mk` 里 GNU Make 明确拒绝路径含空格
+   (报 `Unsupported: GNU Make cannot build in directories containing spaces`),而课程
+   目录 `ECE 4A/ECE 498A/` 就带空格。源文件放在带空格的路径下没问题(Verilator 自己
+   能读),只有**编译输出目录**必须挪到无空格的地方,比如 WSL 里的 `~/aqta_sim/`。
+   下面的命令都这么写。
+2. **RTL 文件里不写 `` `timescale ``**(那是仿真属性,不该进综合源),但 testbench 里
+   有,于是 Verilator 会报 `TIMESCALEMOD`,加 `--Wall` 后直接变成 error。命令里统一带
+   `--timescale 1ns/1ps` 给没声明的模块一个默认值即可。
+
 ---
 
 ## 决定:FCS 和 padding 交给 TEMAC
@@ -57,7 +68,7 @@ PS ─────────────────────────�
 
 | 模块 | 文件 | 职责 | Owner |
 |---|---|---|---|
-| `axi_lite_regbank` | `../axi_lite_regbank.sv` | 唯一懂 AXI-Lite 协议的模块。译码 Table 15(0x40–0x54 段),拆包 `ORD_SYMBOL_SIDE`,实现 DOORBELL 的 write-1-to-pulse | TBD |
+| `axi_lite_regbank` | `../axi_lite_regbank.sv` | 唯一懂 AXI-Lite 协议的模块。译码 Table 15(0x40–0x54 段),拆包 `ORD_SYMBOL_SIDE`,实现 DOORBELL 的 write-1-to-pulse | lucy |
 | `tx_order_latcher` | `tx_order_latcher.sv` | 在 `doorbell_pulse` 上采样订单字段;屏蔽忙碌期到达的 doorbell;驱动 `tx_ready` | TBD |
 | `tx_frame_builder` | `tx_frame_builder.sv` | Payload Build + Frame Build 合并。打包 Table 7,拼接常量 Eth/IP/UDP 头,按字节串行输出到 AXI4-Stream | TBD |
 | `tx_top` | `tx_top.sv` | 纯接线,自身无逻辑 | — |
@@ -190,14 +201,47 @@ VIP/BFM**——一个三十行的 SV task 完成一次写事务就够了。不�
 
 ### `axi_lite_regbank`
 
-- [ ] 写 0x50 → `doorbell_pulse` **恰好 1 拍**(不是 2 拍,不是电平保持)
-- [ ] 写 0x50 但数据为 0 → **不产生脉冲**
-- [ ] 写 `ORD_SYMBOL_SIDE` = 0x00020001 → `ord_symbol == 1` 且 `ord_side == 2`
-- [ ] **AW 和 W 不同拍到达,两种先后顺序各测一次** —— 这是这个模块整个 FSM 存在的
+已实现,testbench 在 `../tb/tb_axi_lite_regbank.sv`(自检查,通过则打印 `PASS`)。
+
+- [x] 写 0x50 → `doorbell_pulse` **恰好 1 拍**(不是 2 拍,不是电平保持)
+- [x] 写 0x50 但数据为 0 → **不产生脉冲**
+- [x] 写 `ORD_SYMBOL_SIDE` = 0x00020001 → `ord_symbol == 1` 且 `ord_side == 2`
+- [x] **AW 和 W 不同拍到达,两种先后顺序各测一次** —— 这是这个模块整个 FSM 存在的
       理由,不测等于没测
-- [ ] 读 0x54 → 返回 `{31'b0, tx_ready}`
-- [ ] 复位期间:所有 ready/valid 为 0,`doorbell_pulse` 为 0
-- [ ] 访问未映射地址不挂死,返回 OKAY 响应
+- [x] 读 0x54 → 返回 `{31'b0, tx_ready}`
+- [x] 复位期间:所有 ready/valid 为 0,`doorbell_pulse` 为 0
+- [x] 访问未映射地址不挂死,返回 OKAY 响应
+
+额外覆盖(不在原清单里,但都是静默错误):`ORD_SYMBOL_SIDE` 的保留位 [31:24] 不能漏进
+`ord_side`;`BREADY`/`RREADY` 被拉低时 `BVALID`/`RVALID`/`RDATA` 必须保持;PS 把
+`BREADY` 拖久了不能把 doorbell 脉冲拉宽;读 0x50 不能触发脉冲;写只读的 0x54 无副作用;
+以及**半个写事务(只发了 AW)期间复位,复位释放后不能补出一个幽灵 doorbell**。
+
+脉冲宽度不是靠 task 顺手检查的,而是一个独立的 monitor 进程在每个时钟沿盯着——task
+自己的时序假设一旦错了,顺手检查也会跟着一起错。
+
+这套用例做过 mutation 反测(手工改坏 RTL 15 处:doorbell 变电平保持、`ord_side` 切错位、
+删掉 AW-first / W-first 中的一条通路、qty/price 互换、`BVALID` 只给 1 拍、提交时用了过期的
+latch 值……),15 处全部被 testbench 抓到。
+
+```bash
+# 从 pl/ 运行。--Mdir 必须落在无空格路径下,见上面工具链那节。
+cd pl
+verilator --lint-only --Wall axi_lite_regbank.sv
+
+verilator --binary --timing --assert --Wall --timescale 1ns/1ps \
+  --top-module tb_axi_lite_regbank \
+  --Mdir ~/aqta_sim/regbank \
+  axi_lite_regbank.sv tb/tb_axi_lite_regbank.sv
+~/aqta_sim/regbank/Vtb_axi_lite_regbank
+```
+
+**Table 15 之外的一处有意偏离:**0x40–0x4C 在 Table 15 里是 W-only,但这里给了读回。
+理由是 AXI-Lite 写是 posted 的,上板 bring-up 时"PS 那 5 个写到底落没落"是最先要排查的
+问题,读回只多一个 mux。**PS 固件不许依赖它**,Table 15 仍然是 W-only 的契约。
+
+RX 侧窗口(0x00–0x2C)现在全部走 unmapped 路径:写被接收后丢弃、读返回 0、都是 OKAY。
+RX owner 接手时在读 mux 和写 case 里各加自己的地址即可,AXI 协议部分不用再碰。
 
 ### `tx_order_latcher`
 
