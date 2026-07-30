@@ -69,13 +69,13 @@ module tb_tx_order_latcher;
     input logic [7:0]  side,
     input logic [31:0] quantity,
     input logic [31:0] price,
-    input string context
+    input string ctx
   );
-    check(cmd_order_id === id, {context, ": order_id"});
-    check(cmd_symbol === symbol, {context, ": symbol"});
-    check(cmd_side === side, {context, ": side"});
-    check(cmd_qty === quantity, {context, ": quantity"});
-    check(cmd_price === price, {context, ": price"});
+    check(cmd_order_id === id, {ctx, ": order_id"});
+    check(cmd_symbol === symbol, {ctx, ": symbol"});
+    check(cmd_side === side, {ctx, ": side"});
+    check(cmd_qty === quantity, {ctx, ": quantity"});
+    check(cmd_price === price, {ctx, ": price"});
   endtask
 
   initial begin
