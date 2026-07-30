@@ -9,7 +9,8 @@
  * 0x40-0x4C then DOORBELL at 0x50 (payload first, doorbell last). */
 
 #define ORDER_PACKET_BYTES 16
-#define ORDER_SYMBOL       1   /* single-equity prototype */
+#define AAPL_SYMBOL_ID     1
+#define AAPL_SYMBOL_NAME   "AAPL"
 
 /* Pack a Decision into out[16] per Table 7 (little-endian). Returns 0 on
  * success, non-zero if a field does not fit its width. */
@@ -17,5 +18,13 @@ int encode_order(const Decision *decision, unsigned int order_id, unsigned char 
 
 /* Encode + emit. Signature matches Catherine's main.c call. */
 void execute_order(Decision decision, unsigned int order_id);
+
+/* HOLD ticks and rejections consume no order_id, so without these they leave
+ * no trace in the console output at all. */
+void report_hold(const Snapshot *snap);
+/* exposure = 已成交仓位 + 在途净股数（本单还没算进去）。拒单行会按 reason 打出
+ * 触发它的那个数：position 打 exposure 的加法，notional 打本单金额。 */
+void report_reject(const Decision *decision, RiskReject reason,
+                   int exposure_shares, const RiskParams *risk_params);
 
 #endif
