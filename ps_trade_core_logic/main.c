@@ -17,9 +17,9 @@ int main() {
     int active_strategy_id = get_active_strategy_id_from_config();
 
     /* FILL 行的读法，一次性说明，免得三个数看不出关系 */
-    printf("[i] 读法: exposure = settled + pending，与 max_position_shares(%u) 比较\n"
-           "[i]        settled=已成交仓位  pending=在途未成交净股数  orders=在途单数\n",
-           risk_params.max_position_shares);
+    // printf("[i] 读法: exposure = settled + pending，与 max_position_shares(%u) 比较\n"
+    //        "[i]        settled=已成交仓位  pending=在途未成交净股数  orders=在途单数\n",
+    //        risk_params.max_position_shares);
 
     int settled_position_shares = 0;
     unsigned int order_id = 0;

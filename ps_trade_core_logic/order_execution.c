@@ -45,10 +45,10 @@ void execute_order(Decision decision, unsigned int order_id) {
     }
 
     // @cye: 定宽格式符让小数点和 ID 对齐（7月24日 practice demo 上 Bill 的建议）
-    printf("[+] TX id=%05u sym=%s(%d) %s qty=%5u px=%8.2f\n",
-           order_id, AAPL_SYMBOL_NAME, AAPL_SYMBOL_ID,
+    printf("[+] %s qty=%5u px=%8.2f  id=%05u sym=%s(%d)\n",
            decision.side == BUY ? "BUY " : "SELL",
-           decision.qty, decision.price / 100.0);
+           decision.qty, decision.price / 100.0,
+           order_id, AAPL_SYMBOL_NAME, AAPL_SYMBOL_ID);
 
     /* Raw Table 7 hex dump -- too noisy for the demo, re-enable to check byte layout.
     printf("  [");
