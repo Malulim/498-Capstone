@@ -19,7 +19,7 @@ Group 2026.36
 | Hanyu Yao | [[FILL-1]] |
 | Catherine Ye | [[FILL-2]] |
 | Ashley Wu | 20901849 |
-| Panzy Pan | [[FILL-4]] |
+| Panzy Pan | 20992671 |
 | Lucy Sun | [[FILL-5]] |
 
 Consultant: William Bishop
@@ -86,7 +86,7 @@ This estimate is consistent with the consultant's assessment recorded in Appendi
 | Hanyu Yao | 72 | [[FILL-7]] | [[FILL-7]] |
 | Catherine Ye | 74 | [[FILL-7]] | [[FILL-7]] |
 | Ashley Wu | 64.5 | 57 | 121.5 |
-| Panzy Pan | 71 | [[FILL-7]] | [[FILL-7]] |
+| Panzy Pan | 71 | 49.5 | 120.5 |
 | Lucy Sun | 73 | [[FILL-7]] | [[FILL-7]] |
 | **Total** | **362** | [[FILL-7]] | [[FILL-7]] |
 
